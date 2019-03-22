@@ -374,6 +374,360 @@ cleanup:
 	return error;
 }
 
+typedef struct git_blame_workdir_diff_entry
+{
+	size_t old_start;
+	size_t old_lines;
+	size_t new_start;
+	size_t new_lines;
+} git_blame_workdir_diff_entry;
+
+static git_blame_workdir_diff_entry *git_blame_workdir_diff_entry__alloc(
+		size_t old_start,
+		size_t old_lines,
+		size_t new_start,
+		size_t new_lines)
+{
+	git_blame_workdir_diff_entry *entry =
+		git__calloc(1, sizeof(git_blame_workdir_diff_entry));
+	if (!entry)
+		return NULL;
+
+	entry->old_start = old_start;
+	entry->old_lines = old_lines;
+	entry->new_start = new_start;
+	entry->new_lines = new_lines;
+
+	return entry;
+}
+
+static void git_blame_workdir_diff_entry__free(git_blame_workdir_diff_entry *entry)
+{
+	git__free(entry);
+}
+
+static int git_blame_workdir_diff_entry_cmp(const void *_a, const void *_b)
+{
+	git_blame_workdir_diff_entry *a = (git_blame_workdir_diff_entry *)_a;
+	git_blame_workdir_diff_entry *b = (git_blame_workdir_diff_entry *)_b;
+
+	if (a->old_start > b->old_start)
+		return 1;
+	else if (a->old_start < b->old_start)
+		return -1;
+	else
+		return 0;
+}
+
+typedef struct git_blame_workdir_diff {
+	git_vector entries;
+} git_blame_workdir_diff;
+
+static void git_blame_workdir_diff__free(git_blame_workdir_diff *diff)
+{
+	size_t i;
+	git_blame_workdir_diff_entry *diff_entry;
+
+	if (!diff)
+		return;
+
+	git_vector_foreach(&diff->entries, i, diff_entry)
+			git_blame_workdir_diff_entry__free(diff_entry);
+	git_vector_free(&diff->entries);
+
+	git__free(diff);
+}
+
+static git_blame_workdir_diff *git_blame_workdir_diff__alloc()
+{
+	git_blame_workdir_diff *diff = git__calloc(1, sizeof(git_blame_workdir_diff));
+
+	if (!diff)
+		return NULL;
+
+	if (git_vector_init(&diff->entries, 8, git_blame_workdir_diff_entry_cmp)
+			< 0) {
+		git_blame_workdir_diff__free(diff);
+		return NULL;
+	}
+
+	return diff;
+}
+
+static int process_workdir_diff_hunk(
+		const git_diff_delta *delta,
+		const git_diff_hunk *hunk,
+		void *payload)
+{
+	git_blame_workdir_diff_entry *entry;
+	git_blame_workdir_diff *wd_diff = (git_blame_workdir_diff *)payload;
+
+	if (delta->status & GIT_DELTA_MODIFIED) {
+		entry = git_blame_workdir_diff_entry__alloc(hunk->old_start,
+				hunk->old_lines, hunk->new_start, hunk->new_lines);
+		if (!entry)
+			return GIT_ERROR;
+		git_vector_insert_sorted(&wd_diff->entries, entry, NULL);
+	}
+
+	return 0;
+}
+
+static int remove_lines_from_hunk_vector(
+		git_vector *vec,
+		size_t start_lineno,
+		size_t num_lines)
+{
+	git_blame_hunk *cur_hunk;
+	size_t cur_hunk_index;
+	size_t removable_lines;
+	bool shift_node;
+
+	if (num_lines == 0)
+		return 0;
+
+	if (git_vector_bsearch2(&cur_hunk_index, vec, hunk_byfinalline_search_cmp,
+			&start_lineno))
+		return GIT_ENOTFOUND;
+
+	while (num_lines > 0) {
+		cur_hunk = (git_blame_hunk*)git_vector_get(vec, cur_hunk_index);
+		/* check if remove from beginning of hunk or middle */
+		if (start_lineno >= cur_hunk->final_start_line_number) {
+			/* remove from the middle of the hunk */
+			removable_lines = (cur_hunk->final_start_line_number +
+					cur_hunk->lines_in_hunk) - start_lineno;
+			shift_node = false;
+		} else {
+			/* remove from the beginning of the hunk */
+			removable_lines = cur_hunk->lines_in_hunk;
+			shift_node = true;
+		}
+
+		if (removable_lines > num_lines)
+			removable_lines = num_lines;
+
+		cur_hunk->lines_in_hunk -= removable_lines;
+		num_lines -= removable_lines;
+
+		if (shift_node)
+			cur_hunk->final_start_line_number += removable_lines;
+
+		if (cur_hunk->lines_in_hunk == 0)
+			git_vector_remove(vec, cur_hunk_index);
+		else
+			cur_hunk_index++;
+	}
+
+	return 0;
+}
+
+static int merge_blame_workdir_diff(
+		git_blame *blame,
+		git_blame_workdir_diff *wd_diff)
+{
+	int error = -1;
+	size_t i;
+	git_blame_workdir_diff_entry *diff_entry;
+	long total_shift_count = 0; /* offset of how much we have shifted so far */
+	size_t old_hunk_index;
+	git_blame_hunk *old_hunk;
+	git_blame_hunk *split_hunk;
+	int diff_entry_delta;
+	git_blame_hunk *nhunk;
+	size_t shift_hunk_index;
+	git_blame_hunk *shift_hunk;
+	git_signature *sig_uncommitted;
+
+	git_signature_now(&sig_uncommitted, "Not Committed Yet", "not.committed.yet");
+
+	git_vector_foreach(&wd_diff->entries, i, diff_entry) {
+		nhunk = NULL;
+
+		/* shift old_start by the number of lines that have been added/removed by
+		 * previous diff_entries
+		*/
+		diff_entry->old_start += total_shift_count;
+
+		if (diff_entry->new_lines > 0) {
+			/* lines are added, so we need to create a new hunk */
+			nhunk = new_hunk(diff_entry->new_start, diff_entry->new_lines,
+					diff_entry->new_start, blame->path);
+			if (!nhunk)
+				goto on_error;
+			git_signature_dup(&nhunk->final_signature, sig_uncommitted);
+			git_signature_dup(&nhunk->orig_signature, sig_uncommitted);
+		}
+
+		/* Get the old hunk that is modified by the diff_entry and split it if
+		 * necessary.
+		*/
+		git_vector_bsearch2(&old_hunk_index, &blame->hunks,
+				hunk_byfinalline_search_cmp, &diff_entry->old_start);
+		old_hunk = (git_blame_hunk*)git_blame_get_hunk_byindex(blame,
+				old_hunk_index);
+		assert(old_hunk && "Could not find hunk.");
+
+		if (diff_entry->new_lines >= diff_entry->old_lines) {
+			diff_entry_delta = diff_entry->new_lines - diff_entry->old_lines;
+		} else {
+			diff_entry_delta = diff_entry->old_lines - diff_entry->new_lines;
+			diff_entry_delta = -diff_entry_delta;
+		}
+
+		/* Check if we need to split the old hunk.
+		 * This is the case if the modification is within the hunk.
+		 * We do not need to split if the diff_entry only removes lines and does
+		 * not add/modify any lines.
+		*/
+		if (diff_entry->old_start >= old_hunk->final_start_line_number &&
+				diff_entry->old_start < (old_hunk->final_start_line_number +
+				old_hunk->lines_in_hunk - 1) && diff_entry->new_lines > 0) {
+			split_hunk = split_hunk_in_vector(&blame->hunks, old_hunk,
+					diff_entry->old_start - (old_hunk->final_start_line_number - 1),
+					true);
+			if (!split_hunk)
+				goto on_error;
+		}
+
+		/* Check if we need to remove lines from the old hunk */
+		if (diff_entry->old_lines > 0) {
+			error = remove_lines_from_hunk_vector(&blame->hunks,
+					diff_entry->old_start, diff_entry->old_lines);
+			assert(error == 0 && "Could not find hunk to remove lines from.");
+		}
+
+		/* Shift subsequent hunks if necessary */
+		if (diff_entry_delta != 0) {
+			shift_hunk_index = old_hunk_index;
+			for (; shift_hunk_index < blame->hunks.length; shift_hunk_index++) {
+				shift_hunk = (git_blame_hunk*)blame->hunks.contents[shift_hunk_index];
+				if (shift_hunk->final_start_line_number > diff_entry->old_start) {
+					shift_hunk->final_start_line_number += diff_entry_delta;
+				}
+			}
+			total_shift_count += diff_entry_delta;
+		}
+
+		/* insert new hunk if there is one (only if hunk adds lines) */
+		if (nhunk) {
+			if ((error = git_vector_insert_sorted(&blame->hunks, nhunk, NULL)) < 0)
+				goto on_error;
+		}
+	}
+
+	return 0;
+
+on_error:
+	free_hunk(nhunk);
+	return error;
+}
+
+static int git_blame_new_file(git_blame *blame)
+{
+	int error;
+	git_oid oid;
+	git_blame_hunk *nhunk = NULL;
+
+	git_signature *sig_uncommitted;
+	git_signature_now(&sig_uncommitted, "Not Committed Yet", "not.committed.yet");
+
+	if ((error = git_blob_create_fromworkdir(
+					&oid, blame->repository, blame->path)) < 0)
+		return error;
+	if ((error = git_blob_lookup(
+					&blame->final_blob, blame->repository, &oid)) < 0)
+		return error;
+	blame->final_buf = git_blob_rawcontent(blame->final_blob);
+	blame->final_buf_size = git_blob_rawsize(blame->final_blob);
+
+	index_blob_lines(blame);
+
+	nhunk = new_hunk(1, blame->num_lines, 1, blame->path);
+	if (!nhunk) {
+		free_hunk(nhunk);
+		return GIT_ERROR;
+	}
+	git_signature_dup(&nhunk->final_signature, sig_uncommitted);
+	git_signature_dup(&nhunk->orig_signature, sig_uncommitted);
+
+	git_vector_insert(&blame->hunks, nhunk);
+
+	return 0;
+}
+
+static int update_blame_with_uncommitted_changes(git_blame *blame)
+{
+	int error;
+	git_object *obj = NULL;
+	git_tree *tree = NULL;
+	git_diff_options diff_options;
+	git_strarray diff_file_paths = {0};
+	git_diff *diff = NULL;
+	git_blame_workdir_diff *wd_diff = NULL;
+	git_oid oid;
+
+	if ((error = git_revparse_single(&obj, blame->repository, "HEAD^{tree}")) < 0)
+		goto on_error;
+
+	if ((error = git_tree_lookup(&tree, blame->repository, git_object_id(obj)))
+			< 0)
+		goto on_error;
+
+	if ((error = git_diff_init_options(&diff_options, GIT_DIFF_OPTIONS_VERSION))
+			< 0)
+		goto on_error;
+
+	diff_file_paths.count = 1;
+	diff_file_paths.strings = malloc(sizeof(char *));
+	if (!diff_file_paths.strings)
+		goto on_error;
+	diff_file_paths.strings[0] = blame->path;
+
+	diff_options.pathspec = diff_file_paths;
+	diff_options.max_size = 0;
+	diff_options.context_lines = 0;
+	diff_options.interhunk_lines = 0;
+
+	if ((error = git_diff_tree_to_workdir(
+					&diff, blame->repository, tree, &diff_options)) < 0)
+		goto on_error;
+
+	wd_diff =  git_blame_workdir_diff__alloc();
+	if (!wd_diff)
+		goto on_error;
+
+	if ((error = git_diff_foreach(
+					diff, NULL, NULL, process_workdir_diff_hunk, NULL, wd_diff)) < 0)
+		goto on_error;
+
+	if ((error = merge_blame_workdir_diff(blame, wd_diff)) < 0)
+		goto on_error;
+
+	if ((error = git_blob_create_fromworkdir(
+					&oid, blame->repository, blame->path)) < 0)
+		goto on_error;
+	if ((error = git_blob_lookup(&blame->final_blob, blame->repository, &oid))
+			< 0)
+		goto on_error;
+	blame->final_buf = git_blob_rawcontent(blame->final_blob);
+	blame->final_buf_size = git_blob_rawsize(blame->final_blob);
+
+	git_array_clear(blame->line_index);
+	index_blob_lines(blame);
+
+	error = 0;
+
+on_error:
+	git_blame_workdir_diff__free(wd_diff);
+	git_diff_free(diff);
+	free(diff_file_paths.strings);
+	git_tree_free(tree);
+	git_object_free(obj);
+
+	return error;
+}
+
 /*******************************************************************************
  * File blaming
  ******************************************************************************/
@@ -387,6 +741,8 @@ int git_blame_file(
 	int error = -1;
 	git_blame_options normOptions = GIT_BLAME_OPTIONS_INIT;
 	git_blame *blame = NULL;
+	git_oid oid_head;
+	git_reference_name_to_id(&oid_head, repo, "HEAD");
 
 	assert(out && repo && path);
 	if ((error = normalize_options(&normOptions, options, repo)) < 0)
@@ -395,11 +751,25 @@ int git_blame_file(
 	blame = git_blame__alloc(repo, normOptions, path);
 	GIT_ERROR_CHECK_ALLOC(blame);
 
-	if ((error = load_blob(blame)) < 0)
-		goto on_error;
+	if ((error = load_blob(blame)) < 0) {
+		if (normOptions.flags & GIT_BLAME_INCLUDE_UNCOMMITTED_CHANGES) {
+			if ((error = git_blame_new_file(blame)) < 0)
+				goto on_error;
+			*out = blame;
+			return 0;
+		} else {
+			goto on_error;
+		}
+	}
 
 	if ((error = blame_internal(blame)) < 0)
 		goto on_error;
+
+	if (normOptions.flags & GIT_BLAME_INCLUDE_UNCOMMITTED_CHANGES &&
+			git_oid_equal(&oid_head, &normOptions.newest_commit)) {
+		if ((error = update_blame_with_uncommitted_changes(blame)) < 0)
+			goto on_error;
+	}
 
 	*out = blame;
 	return 0;
