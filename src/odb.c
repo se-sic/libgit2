@@ -10,7 +10,7 @@
 #include <zlib.h>
 #include "git2/object.h"
 #include "git2/sys/odb_backend.h"
-#include "fileops.h"
+#include "futils.h"
 #include "hash.h"
 #include "delta.h"
 #include "filter.h"
@@ -548,6 +548,7 @@ int git_odb__add_default_backends(
 #else
 	if (p_stat(objects_dir, &st) < 0) {
 		if (as_alternates)
+			/* this should warn */
 			return 0;
 
 		git_error_set(GIT_ERROR_ODB, "failed to load object database in '%s'", objects_dir);
@@ -665,7 +666,7 @@ int git_odb__set_caps(git_odb *odb, int caps)
 			return -1;
 		}
 
-		if (!git_repository__cvar(&val, repo, GIT_CVAR_FSYNCOBJECTFILES))
+		if (!git_repository__configmap_lookup(&val, repo, GIT_CONFIGMAP_FSYNCOBJECTFILES))
 			odb->do_fsync = !!val;
 	}
 
@@ -766,7 +767,7 @@ int git_odb_exists(git_odb *db, const git_oid *id)
 
 	assert(db && id);
 
-	if (git_oid_iszero(id))
+	if (git_oid_is_zero(id))
 		return 0;
 
 	if ((object = git_cache_get_raw(odb_cache(db), id)) != NULL) {
@@ -994,7 +995,7 @@ int git_odb__read_header_or_object(
 
 	*out = NULL;
 
-	if (git_oid_iszero(id))
+	if (git_oid_is_zero(id))
 		return error_null_oid(GIT_ENOTFOUND, "cannot read object");
 
 	if ((object = git_cache_get_raw(odb_cache(db), id)) != NULL) {
@@ -1099,7 +1100,7 @@ int git_odb_read(git_odb_object **out, git_odb *db, const git_oid *id)
 
 	assert(out && db && id);
 
-	if (git_oid_iszero(id))
+	if (git_oid_is_zero(id))
 		return error_null_oid(GIT_ENOTFOUND, "cannot read object");
 
 	*out = git_cache_get_raw(odb_cache(db), id);
@@ -1123,7 +1124,7 @@ static int odb_otype_fast(git_object_t *type_p, git_odb *db, const git_oid *id)
 	size_t _unused;
 	int error;
 
-	if (git_oid_iszero(id))
+	if (git_oid_is_zero(id))
 		return error_null_oid(GIT_ENOTFOUND, "cannot get object type");
 
 	if ((object = git_cache_get_raw(odb_cache(db), id)) != NULL) {
@@ -1283,7 +1284,7 @@ int git_odb_write(
 
 	git_odb_hash(oid, data, len, type);
 
-	if (git_oid_iszero(oid))
+	if (git_oid_is_zero(oid))
 		return error_null_oid(GIT_EINVALID, "cannot write object");
 
 	if (git_odb__freshen(db, oid))

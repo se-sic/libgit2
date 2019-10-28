@@ -268,7 +268,7 @@ static int rebase_alloc(git_rebase **out, const git_rebase_options *rebase_opts)
 	if (rebase_opts)
 		memcpy(&rebase->options, rebase_opts, sizeof(git_rebase_options));
 	else
-		git_rebase_init_options(&rebase->options, GIT_REBASE_OPTIONS_VERSION);
+		git_rebase_options_init(&rebase->options, GIT_REBASE_OPTIONS_VERSION);
 
 	if (rebase_opts && rebase_opts->rewrite_notes_ref) {
 		rebase->options.rewrite_notes_ref = git__strdup(rebase_opts->rewrite_notes_ref);
@@ -298,7 +298,8 @@ int git_rebase_open(
 	git_rebase *rebase;
 	git_buf path = GIT_BUF_INIT, orig_head_name = GIT_BUF_INIT,
 		orig_head_id = GIT_BUF_INIT, onto_id = GIT_BUF_INIT;
-	int state_path_len, error;
+	size_t state_path_len;
+	int error;
 
 	assert(repo);
 
@@ -493,11 +494,16 @@ static int rebase_setupfiles(git_rebase *rebase)
 	return rebase_setupfiles_merge(rebase);
 }
 
-int git_rebase_init_options(git_rebase_options *opts, unsigned int version)
+int git_rebase_options_init(git_rebase_options *opts, unsigned int version)
 {
 	GIT_INIT_STRUCTURE_FROM_TEMPLATE(
 		opts, version, git_rebase_options, GIT_REBASE_OPTIONS_INIT);
 	return 0;
+}
+
+int git_rebase_init_options(git_rebase_options *opts, unsigned int version)
+{
+	return git_rebase_options_init(opts, version);
 }
 
 static int rebase_ensure_not_in_progress(git_repository *repo)
@@ -945,6 +951,10 @@ static int rebase_commit__create(
 	git_commit *current_commit = NULL, *commit = NULL;
 	git_tree *parent_tree = NULL, *tree = NULL;
 	git_oid tree_id, commit_id;
+	git_buf commit_content = GIT_BUF_INIT, commit_signature = GIT_BUF_INIT,
+		signature_field = GIT_BUF_INIT;
+	const char *signature_field_string = NULL,
+		*commit_signature_string = NULL;
 	int error;
 
 	operation = git_array_get(rebase->operations, rebase->current);
@@ -975,10 +985,40 @@ static int rebase_commit__create(
 		message = git_commit_message(current_commit);
 	}
 
-	if ((error = git_commit_create(&commit_id, rebase->repo, NULL, author,
-		committer, message_encoding, message, tree, 1,
-		(const git_commit **)&parent_commit)) < 0 ||
-		(error = git_commit_lookup(&commit, rebase->repo, &commit_id)) < 0)
+	if ((error = git_commit_create_buffer(&commit_content, rebase->repo, author, committer,
+			message_encoding, message, tree, 1, (const git_commit **)&parent_commit)) < 0)
+		goto done;
+
+	if (rebase->options.signing_cb) {
+		git_error_clear();
+		error = git_error_set_after_callback_function(rebase->options.signing_cb(
+			&commit_signature, &signature_field, git_buf_cstr(&commit_content),
+			rebase->options.payload), "commit signing_cb failed");
+		if (error == GIT_PASSTHROUGH) {
+			git_buf_dispose(&commit_signature);
+			git_buf_dispose(&signature_field);
+			git_error_clear();
+			error = GIT_OK;
+		} else if (error < 0)
+			goto done;
+	}
+
+	if (git_buf_is_allocated(&commit_signature)) {
+		assert(git_buf_contains_nul(&commit_signature));
+		commit_signature_string = git_buf_cstr(&commit_signature);
+	}
+
+	if (git_buf_is_allocated(&signature_field)) {
+		assert(git_buf_contains_nul(&signature_field));
+		signature_field_string = git_buf_cstr(&signature_field);
+	}
+
+	if ((error = git_commit_create_with_signature(&commit_id, rebase->repo,
+			git_buf_cstr(&commit_content), commit_signature_string,
+			signature_field_string)))
+		goto done;
+
+	if ((error = git_commit_lookup(&commit, rebase->repo, &commit_id)) < 0)
 		goto done;
 
 	*out = commit;
@@ -987,6 +1027,9 @@ done:
 	if (error < 0)
 		git_commit_free(commit);
 
+	git_buf_dispose(&commit_signature);
+	git_buf_dispose(&signature_field);
+	git_buf_dispose(&commit_content);
 	git_commit_free(current_commit);
 	git_tree_free(parent_tree);
 	git_tree_free(tree);
@@ -1325,6 +1368,22 @@ int git_rebase_finish(
 		error = rebase_cleanup(rebase);
 
 	return error;
+}
+
+const char *git_rebase_orig_head_name(git_rebase *rebase) {
+	return rebase->orig_head_name;
+}
+
+const git_oid *git_rebase_orig_head_id(git_rebase *rebase) {
+	return &rebase->orig_head_id;
+}
+
+const char *git_rebase_onto_name(git_rebase *rebase) {
+	return rebase->onto_name;
+}
+
+const git_oid *git_rebase_onto_id(git_rebase *rebase) {
+	return &rebase->onto_id;
 }
 
 size_t git_rebase_operation_entrycount(git_rebase *rebase)

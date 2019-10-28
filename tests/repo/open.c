@@ -1,5 +1,5 @@
 #include "clar_libgit2.h"
-#include "fileops.h"
+#include "futils.h"
 #include "sysdir.h"
 #include <ctype.h>
 
@@ -88,6 +88,17 @@ void test_repo_open__open_with_discover(void)
 	cl_fixture_cleanup("attr");
 }
 
+void test_repo_open__check_if_repository(void)
+{
+	cl_git_sandbox_init("empty_standard_repo");
+
+	/* Pass NULL for the output parameter to check for but not open the repo */
+	cl_git_pass(git_repository_open_ext(NULL, "empty_standard_repo", 0, NULL));
+	cl_git_fail(git_repository_open_ext(NULL, "repo_does_not_exist", 0, NULL));
+
+	cl_fixture_cleanup("empty_standard_repo");
+}
+
 static void make_gitlink_dir(const char *dir, const char *linktext)
 {
 	git_buf path = GIT_BUF_INIT;
@@ -116,6 +127,36 @@ void test_repo_open__gitlinked(void)
 	cl_assert_(git__suffixcmp(git_repository_workdir(repo2), "alternate/") == 0, git_repository_workdir(repo2));
 
 	git_repository_free(repo2);
+}
+
+void test_repo_open__with_symlinked_config(void)
+{
+#ifndef GIT_WIN32
+	git_buf path = GIT_BUF_INIT;
+	git_repository *repo;
+	git_config *cfg;
+	int32_t value;
+
+	cl_git_sandbox_init("empty_standard_repo");
+
+	/* Setup .gitconfig as symlink */
+	cl_git_pass(git_futils_mkdir_r("home", 0777));
+	cl_git_mkfile("home/.gitconfig.linked", "[global]\ntest = 4567\n");
+	cl_must_pass(symlink(".gitconfig.linked", "home/.gitconfig"));
+	cl_git_pass(git_path_prettify(&path, "home", NULL));
+	cl_git_pass(git_libgit2_opts(GIT_OPT_SET_SEARCH_PATH, GIT_CONFIG_LEVEL_GLOBAL, path.ptr));
+
+	cl_git_pass(git_repository_open(&repo, "empty_standard_repo"));
+	cl_git_pass(git_config_open_default(&cfg));
+	cl_git_pass(git_config_get_int32(&value, cfg, "global.test"));
+	cl_assert_equal_i(4567, value);
+
+	git_config_free(cfg);
+	git_repository_free(repo);
+	cl_git_pass(git_futils_rmdir_r(git_buf_cstr(&path), NULL, GIT_RMDIR_REMOVE_FILES));
+	cl_sandbox_set_search_path_defaults();
+	git_buf_dispose(&path);
+#endif
 }
 
 void test_repo_open__from_git_new_workdir(void)

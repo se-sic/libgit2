@@ -73,3 +73,47 @@ void test_object_tree_read__two(void)
 	git_object_free(obj);
 	git_tree_free(tree);
 }
+
+#define BIGFILE "bigfile"
+
+#ifdef GIT_ARCH_64
+#define BIGFILE_SIZE (off_t)4294967296
+#else
+# define BIGFILE_SIZE SIZE_MAX
+#endif
+
+void test_object_tree_read__largefile(void)
+{
+	const git_tree_entry *entry;
+	git_index_entry ie;
+	git_commit *commit;
+	git_object *object;
+	git_index *index;
+	git_tree *tree;
+	git_oid oid;
+	char *buf;
+
+	if (!cl_is_env_set("GITTEST_INVASIVE_FS_SIZE"))
+		cl_skip();
+
+	cl_assert(buf = git__calloc(1, BIGFILE_SIZE));
+
+	memset(&ie, 0, sizeof(ie));
+	ie.mode = GIT_FILEMODE_BLOB;
+	ie.path = BIGFILE;
+
+	cl_git_pass(git_repository_index(&index, g_repo));
+	cl_git_pass(git_index_add_from_buffer(index, &ie, buf, BIGFILE_SIZE));
+	cl_repo_commit_from_index(&oid, g_repo, NULL, 0, BIGFILE);
+
+	cl_git_pass(git_commit_lookup(&commit, g_repo, &oid));
+	cl_git_pass(git_commit_tree(&tree, commit));
+	cl_assert(entry = git_tree_entry_byname(tree, BIGFILE));
+	cl_git_pass(git_tree_entry_to_object(&object, g_repo, entry));
+
+	git_object_free(object);
+	git_tree_free(tree);
+	git_index_free(index);
+	git_commit_free(commit);
+	git__free(buf);
+}

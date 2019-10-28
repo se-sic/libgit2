@@ -10,7 +10,7 @@
 #include "diff.h"
 #include "diff_file.h"
 #include "patch_generate.h"
-#include "fileops.h"
+#include "futils.h"
 #include "zstream.h"
 #include "blob.h"
 #include "delta.h"
@@ -48,7 +48,7 @@ static int diff_print_info_init__common(
 	if (!pi->id_strlen) {
 		if (!repo)
 			pi->id_strlen = GIT_ABBREV_DEFAULT;
-		else if (git_repository__cvar(&pi->id_strlen, repo, GIT_CVAR_ABBREV) < 0)
+		else if (git_repository__configmap_lookup(&pi->id_strlen, repo, GIT_CONFIGMAP_ABBREV) < 0)
 			return -1;
 	}
 
@@ -325,10 +325,10 @@ static int diff_delta_format_with_paths(
 	const char *oldpath,
 	const char *newpath)
 {
-	if (git_oid_iszero(&delta->old_file.id))
+	if (git_oid_is_zero(&delta->old_file.id))
 		oldpath = "/dev/null";
 
-	if (git_oid_iszero(&delta->new_file.id))
+	if (git_oid_is_zero(&delta->new_file.id))
 		newpath = "/dev/null";
 
 	return git_buf_printf(out, template, oldpath, newpath);
@@ -381,8 +381,8 @@ done:
 
 static bool delta_is_unchanged(const git_diff_delta *delta)
 {
-	if (git_oid_iszero(&delta->old_file.id) &&
-		git_oid_iszero(&delta->new_file.id))
+	if (git_oid_is_zero(&delta->old_file.id) &&
+		git_oid_is_zero(&delta->new_file.id))
 		return true;
 
 	if (delta->old_file.mode == GIT_FILEMODE_COMMIT ||

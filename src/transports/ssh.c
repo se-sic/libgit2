@@ -14,10 +14,13 @@
 #include "global.h"
 #include "git2.h"
 #include "buffer.h"
+#include "net.h"
 #include "netops.h"
 #include "smart.h"
-#include "cred.h"
 #include "streams/socket.h"
+
+#include "git2/cred.h"
+#include "git2/sys/cred.h"
 
 #ifdef GIT_SSH
 
@@ -132,7 +135,7 @@ static int ssh_stream_read(
 	size_t *bytes_read)
 {
 	int rc;
-	ssh_stream *s = (ssh_stream *)stream;
+	ssh_stream *s = GIT_CONTAINER_OF(stream, ssh_stream, parent);
 
 	*bytes_read = 0;
 
@@ -170,7 +173,7 @@ static int ssh_stream_write(
 	const char *buffer,
 	size_t len)
 {
-	ssh_stream *s = (ssh_stream *)stream;
+	ssh_stream *s = GIT_CONTAINER_OF(stream, ssh_stream, parent);
 	size_t off = 0;
 	ssize_t ret = 0;
 
@@ -196,7 +199,7 @@ static int ssh_stream_write(
 
 static void ssh_stream_free(git_smart_subtransport_stream *stream)
 {
-	ssh_stream *s = (ssh_stream *)stream;
+	ssh_stream *s = GIT_CONTAINER_OF(stream, ssh_stream, parent);
 	ssh_subtransport *t;
 
 	if (!stream)
@@ -258,8 +261,7 @@ static int ssh_stream_alloc(
 }
 
 static int git_ssh_extract_url_parts(
-	char **host,
-	char **username,
+	git_net_url *urldata,
 	const char *url)
 {
 	char *colon, *at;
@@ -271,11 +273,11 @@ static int git_ssh_extract_url_parts(
 	at = strchr(url, '@');
 	if (at) {
 		start = at + 1;
-		*username = git__substrdup(url, at - url);
-		GIT_ERROR_CHECK_ALLOC(*username);
+		urldata->username = git__substrdup(url, at - url);
+		GIT_ERROR_CHECK_ALLOC(urldata->username);
 	} else {
 		start = url;
-		*username = NULL;
+		urldata->username = NULL;
 	}
 
 	if (colon == NULL || (colon < start)) {
@@ -283,8 +285,8 @@ static int git_ssh_extract_url_parts(
 		return -1;
 	}
 
-	*host = git__substrdup(start, colon - start);
-	GIT_ERROR_CHECK_ALLOC(*host);
+	urldata->host = git__substrdup(start, colon - start);
+	GIT_ERROR_CHECK_ALLOC(urldata->host);
 
 	return 0;
 }
@@ -479,7 +481,7 @@ static int _git_ssh_session_create(
 {
 	int rc = 0;
 	LIBSSH2_SESSION* s;
-	git_socket_stream *socket = (git_socket_stream *) io;
+	git_socket_stream *socket = GIT_CONTAINER_OF(io, git_socket_stream, parent);
 
 	assert(session);
 
@@ -506,14 +508,15 @@ static int _git_ssh_session_create(
 	return 0;
 }
 
+#define SSH_DEFAULT_PORT "22"
+
 static int _git_ssh_setup_conn(
 	ssh_subtransport *t,
 	const char *url,
 	const char *cmd,
 	git_smart_subtransport_stream **stream)
 {
-	char *host=NULL, *port=NULL, *path=NULL, *user=NULL, *pass=NULL;
-	const char *default_port="22";
+	git_net_url urldata = GIT_NET_URL_INIT;
 	int auth_methods, error = 0;
 	size_t i;
 	ssh_stream *s;
@@ -535,19 +538,22 @@ static int _git_ssh_setup_conn(
 		const char *p = ssh_prefixes[i];
 
 		if (!git__prefixcmp(url, p)) {
-			if ((error = gitno_extract_url_parts(&host, &port, &path, &user, &pass, url, default_port)) < 0)
+			if ((error = git_net_url_parse(&urldata, url)) < 0)
 				goto done;
 
 			goto post_extract;
 		}
 	}
-	if ((error = git_ssh_extract_url_parts(&host, &user, url)) < 0)
+	if ((error = git_ssh_extract_url_parts(&urldata, url)) < 0)
 		goto done;
-	port = git__strdup(default_port);
-	GIT_ERROR_CHECK_ALLOC(port);
+
+	if (urldata.port == NULL)
+		urldata.port = git__strdup(SSH_DEFAULT_PORT);
+
+	GIT_ERROR_CHECK_ALLOC(urldata.port);
 
 post_extract:
-	if ((error = git_socket_stream_new(&s->io, host, port)) < 0 ||
+	if ((error = git_socket_stream_new(&s->io, urldata.host, urldata.port)) < 0 ||
 	    (error = git_stream_connect(s->io)) < 0)
 		goto done;
 
@@ -583,7 +589,7 @@ post_extract:
 
 		cert_ptr = &cert;
 
-		error = t->owner->certificate_check_cb((git_cert *) cert_ptr, 0, host, t->owner->message_cb_payload);
+		error = t->owner->certificate_check_cb((git_cert *) cert_ptr, 0, urldata.host, t->owner->message_cb_payload);
 
 		if (error < 0 && error != GIT_PASSTHROUGH) {
 			if (!git_error_last())
@@ -594,21 +600,21 @@ post_extract:
 	}
 
 	/* we need the username to ask for auth methods */
-	if (!user) {
+	if (!urldata.username) {
 		if ((error = request_creds(&cred, t, NULL, GIT_CREDTYPE_USERNAME)) < 0)
 			goto done;
 
-		user = git__strdup(((git_cred_username *) cred)->username);
+		urldata.username = git__strdup(((git_cred_username *) cred)->username);
 		cred->free(cred);
 		cred = NULL;
-		if (!user)
+		if (!urldata.username)
 			goto done;
-	} else if (user && pass) {
-		if ((error = git_cred_userpass_plaintext_new(&cred, user, pass)) < 0)
+	} else if (urldata.username && urldata.password) {
+		if ((error = git_cred_userpass_plaintext_new(&cred, urldata.username, urldata.password)) < 0)
 			goto done;
 	}
 
-	if ((error = list_auth_methods(&auth_methods, session, user)) < 0)
+	if ((error = list_auth_methods(&auth_methods, session, urldata.username)) < 0)
 		goto done;
 
 	error = GIT_EAUTH;
@@ -622,10 +628,10 @@ post_extract:
 			cred = NULL;
 		}
 
-		if ((error = request_creds(&cred, t, user, auth_methods)) < 0)
+		if ((error = request_creds(&cred, t, urldata.username, auth_methods)) < 0)
 			goto done;
 
-		if (strcmp(user, git_cred__username(cred))) {
+		if (strcmp(urldata.username, git_cred_get_username(cred))) {
 			git_error_set(GIT_ERROR_SSH, "username does not match previous request");
 			error = -1;
 			goto done;
@@ -662,11 +668,7 @@ done:
 	if (cred)
 		cred->free(cred);
 
-	git__free(host);
-	git__free(port);
-	git__free(path);
-	git__free(user);
-	git__free(pass);
+	git_net_url_dispose(&urldata);
 
 	return error;
 }
@@ -730,7 +732,7 @@ static int _ssh_action(
 	const char *url,
 	git_smart_service_t action)
 {
-	ssh_subtransport *t = (ssh_subtransport *) subtransport;
+	ssh_subtransport *t = GIT_CONTAINER_OF(subtransport, ssh_subtransport, parent);
 
 	switch (action) {
 		case GIT_SERVICE_UPLOADPACK_LS:
@@ -752,7 +754,7 @@ static int _ssh_action(
 
 static int _ssh_close(git_smart_subtransport *subtransport)
 {
-	ssh_subtransport *t = (ssh_subtransport *) subtransport;
+	ssh_subtransport *t = GIT_CONTAINER_OF(subtransport, ssh_subtransport, parent);
 
 	assert(!t->current_stream);
 
@@ -763,7 +765,7 @@ static int _ssh_close(git_smart_subtransport *subtransport)
 
 static void _ssh_free(git_smart_subtransport *subtransport)
 {
-	ssh_subtransport *t = (ssh_subtransport *) subtransport;
+	ssh_subtransport *t = GIT_CONTAINER_OF(subtransport, ssh_subtransport, parent);
 
 	assert(!t->current_stream);
 

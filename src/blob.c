@@ -70,7 +70,7 @@ int git_blob__parse(void *_blob, git_odb_object *odb_obj)
 	return 0;
 }
 
-int git_blob_create_frombuffer(
+int git_blob_create_from_buffer(
 	git_oid *id, git_repository *repo, const void *buffer, size_t len)
 {
 	int error;
@@ -263,13 +263,13 @@ done:
 	return error;
 }
 
-int git_blob_create_fromworkdir(
+int git_blob_create_from_workdir(
 	git_oid *id, git_repository *repo, const char *path)
 {
 	return git_blob__create_from_paths(id, NULL, repo, NULL, path, 0, true);
 }
 
-int git_blob_create_fromdisk(
+int git_blob_create_from_disk(
 	git_oid *id, git_repository *repo, const char *path)
 {
 	int error;
@@ -325,7 +325,7 @@ static int blob_writestream_write(git_writestream *_stream, const char *buffer, 
 	return git_filebuf_write(&stream->fbuf, buffer, len);
 }
 
-int git_blob_create_fromstream(git_writestream **out, git_repository *repo, const char *hintpath)
+int git_blob_create_from_stream(git_writestream **out, git_repository *repo, const char *hintpath)
 {
 	int error;
 	git_buf path = GIT_BUF_INIT;
@@ -364,7 +364,7 @@ cleanup:
 	return error;
 }
 
-int git_blob_create_fromstream_commit(git_oid *out, git_writestream *_stream)
+int git_blob_create_from_stream_commit(git_oid *out, git_writestream *_stream)
 {
 	int error;
 	blob_writestream *stream = (blob_writestream *) _stream;
@@ -400,25 +400,40 @@ int git_blob_is_binary(const git_blob *blob)
 	return git_buf_text_is_binary(&content);
 }
 
-int git_blob_filtered_content(
+int git_blob_filter(
 	git_buf *out,
 	git_blob *blob,
 	const char *path,
-	int check_for_binary_data)
+	git_blob_filter_options *given_opts)
 {
 	int error = 0;
 	git_filter_list *fl = NULL;
+	git_blob_filter_options opts = GIT_BLOB_FILTER_OPTIONS_INIT;
+	git_filter_flag_t flags = GIT_FILTER_DEFAULT;
 
 	assert(blob && path && out);
 
 	git_buf_sanitize(out);
 
-	if (check_for_binary_data && git_blob_is_binary(blob))
+	GIT_ERROR_CHECK_VERSION(
+		given_opts, GIT_BLOB_FILTER_OPTIONS_VERSION, "git_blob_filter_options");
+
+	if (given_opts != NULL)
+		memcpy(&opts, given_opts, sizeof(git_blob_filter_options));
+
+	if ((opts.flags & GIT_BLOB_FILTER_CHECK_FOR_BINARY) != 0 &&
+	    git_blob_is_binary(blob))
 		return 0;
+
+	if ((opts.flags & GIT_BLOB_FILTER_NO_SYSTEM_ATTRIBUTES) != 0)
+		flags |= GIT_FILTER_NO_SYSTEM_ATTRIBUTES;
+
+	if ((opts.flags & GIT_BLOB_FILTER_ATTTRIBUTES_FROM_HEAD) != 0)
+		flags |= GIT_FILTER_ATTRIBUTES_FROM_HEAD;
 
 	if (!(error = git_filter_list_load(
 			&fl, git_blob_owner(blob), blob, path,
-			GIT_FILTER_TO_WORKTREE, GIT_FILTER_DEFAULT))) {
+			GIT_FILTER_TO_WORKTREE, flags))) {
 
 		error = git_filter_list_apply_to_blob(out, fl, blob);
 
@@ -426,4 +441,53 @@ int git_blob_filtered_content(
 	}
 
 	return error;
+}
+
+/* Deprecated functions */
+
+int git_blob_create_frombuffer(
+	git_oid *id, git_repository *repo, const void *buffer, size_t len)
+{
+	return git_blob_create_from_buffer(id, repo, buffer, len);
+}
+
+int git_blob_create_fromworkdir(git_oid *id, git_repository *repo, const char *relative_path)
+{
+	return git_blob_create_from_workdir(id, repo, relative_path);
+}
+
+int git_blob_create_fromdisk(git_oid *id, git_repository *repo, const char *path)
+{
+	return git_blob_create_from_disk(id, repo, path);
+}
+
+int git_blob_create_fromstream(
+    git_writestream **out,
+    git_repository *repo,
+    const char *hintpath)
+{
+	return  git_blob_create_from_stream(out, repo, hintpath);
+}
+
+int git_blob_create_fromstream_commit(
+	git_oid *out,
+	git_writestream *stream)
+{
+	return git_blob_create_from_stream_commit(out, stream);
+}
+
+int git_blob_filtered_content(
+	git_buf *out,
+	git_blob *blob,
+	const char *path,
+	int check_for_binary_data)
+{
+	git_blob_filter_options opts = GIT_BLOB_FILTER_OPTIONS_INIT;
+
+	if (check_for_binary_data)
+		opts.flags |= GIT_BLOB_FILTER_CHECK_FOR_BINARY;
+	else
+		opts.flags &= ~GIT_BLOB_FILTER_CHECK_FOR_BINARY;
+
+	return git_blob_filter(out, blob, path, &opts);
 }

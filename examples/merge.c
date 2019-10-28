@@ -15,10 +15,6 @@
 #include "common.h"
 #include <assert.h>
 
-#ifdef _MSC_VER
-#define snprintf sprintf_s
-#endif
-
 /** The following example demonstrates how to do merges with libgit2.
  *
  * It will merge whatever commit-ish you pass in into the current branch.
@@ -61,7 +57,7 @@ static void opts_add_refish(merge_options *opts, const char *refish)
 	assert(opts != NULL);
 
 	sz = ++opts->heads_count * sizeof(opts->heads[0]);
-	opts->heads = xrealloc(opts->heads, sz);
+	opts->heads = xrealloc((void *) opts->heads, sz);
 	opts->heads[opts->heads_count - 1] = refish;
 }
 
@@ -224,6 +220,7 @@ static int create_merge_commit(git_repository *repo, git_index *index, merge_opt
 	check_lg2(git_repository_head(&head_ref, repo), "failed to get repo HEAD", NULL);
 	if (resolve_refish(&merge_commit, repo, opts->heads[0])) {
 		fprintf(stderr, "failed to resolve refish %s", opts->heads[0]);
+		free(parents);
 		return -1;
 	}
 
@@ -358,7 +355,7 @@ int lg2_merge(git_repository *repo, int argc, char **argv)
 	}
 
 cleanup:
-	free(opts.heads);
+	free((char **)opts.heads);
 	free(opts.annotated);
 
 	return 0;

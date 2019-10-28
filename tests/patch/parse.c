@@ -27,6 +27,18 @@ static void ensure_patch_validity(git_patch *patch)
 	cl_assert_equal_i(0, delta->new_file.size);
 }
 
+static void ensure_identical_patch_inout(const char *content) {
+	git_buf buf = GIT_BUF_INIT;
+	git_patch *patch;
+
+	cl_git_pass(git_patch_from_buffer(&patch, content, strlen(content), NULL));
+	cl_git_pass(git_patch_to_buf(&buf, patch));
+	cl_assert_equal_strn(git_buf_cstr(&buf), content, strlen(content));
+
+	git_patch_free(patch);
+	git_buf_dispose(&buf);
+}
+
 void test_patch_parse__original_to_change_middle(void)
 {
 	git_patch *patch;
@@ -102,9 +114,37 @@ void test_patch_parse__invalid_patches_fails(void)
 		strlen(PATCH_CORRUPT_MISSING_HUNK_HEADER), NULL));
 }
 
+void test_patch_parse__no_newline_at_end_of_new_file(void)
+{
+	ensure_identical_patch_inout(PATCH_APPEND_NO_NL);
+}
+
+void test_patch_parse__no_newline_at_end_of_old_file(void)
+{
+	ensure_identical_patch_inout(PATCH_APPEND_NO_NL_IN_OLD_FILE);
+}
+
 void test_patch_parse__files_with_whitespaces_succeeds(void)
 {
+	ensure_identical_patch_inout(PATCH_NAME_WHITESPACE);
+}
+
+void test_patch_parse__lifetime_of_patch_does_not_depend_on_buffer(void)
+{
+	git_buf diff = GIT_BUF_INIT, rendered = GIT_BUF_INIT;
 	git_patch *patch;
-	cl_git_pass(git_patch_from_buffer(&patch, PATCH_NAME_WHITESPACE, strlen(PATCH_NAME_WHITESPACE), NULL));
+
+	cl_git_pass(git_buf_sets(&diff, PATCH_ORIGINAL_TO_CHANGE_MIDDLE));
+	cl_git_pass(git_patch_from_buffer(&patch, diff.ptr, diff.size, NULL));
+	git_buf_dispose(&diff);
+
+	cl_git_pass(git_patch_to_buf(&rendered, patch));
+	cl_assert_equal_s(PATCH_ORIGINAL_TO_CHANGE_MIDDLE, rendered.ptr);
+	git_buf_dispose(&rendered);
+
+	cl_git_pass(git_patch_to_buf(&rendered, patch));
+	cl_assert_equal_s(PATCH_ORIGINAL_TO_CHANGE_MIDDLE, rendered.ptr);
+	git_buf_dispose(&rendered);
+
 	git_patch_free(patch);
 }

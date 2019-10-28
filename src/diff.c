@@ -323,7 +323,7 @@ int git_diff_commit_as_email(
 	git_commit *commit,
 	size_t patch_no,
 	size_t total_patches,
-	git_diff_format_email_flags_t flags,
+	uint32_t flags,
 	const git_diff_options *diff_opts)
 {
 	git_diff *diff = NULL;
@@ -350,14 +350,19 @@ int git_diff_commit_as_email(
 	return error;
 }
 
-int git_diff_init_options(git_diff_options *opts, unsigned int version)
+int git_diff_options_init(git_diff_options *opts, unsigned int version)
 {
 	GIT_INIT_STRUCTURE_FROM_TEMPLATE(
 		opts, version, git_diff_options, GIT_DIFF_OPTIONS_INIT);
 	return 0;
 }
 
-int git_diff_find_init_options(
+int git_diff_init_options(git_diff_options *opts, unsigned int version)
+{
+	return git_diff_options_init(opts, version);
+}
+
+int git_diff_find_options_init(
 	git_diff_find_options *opts, unsigned int version)
 {
 	GIT_INIT_STRUCTURE_FROM_TEMPLATE(
@@ -365,13 +370,25 @@ int git_diff_find_init_options(
 	return 0;
 }
 
-int git_diff_format_email_init_options(
+int git_diff_find_init_options(
+	git_diff_find_options *opts, unsigned int version)
+{
+	return git_diff_find_options_init(opts, version);
+}
+
+int git_diff_format_email_options_init(
 	git_diff_format_email_options *opts, unsigned int version)
 {
 	GIT_INIT_STRUCTURE_FROM_TEMPLATE(
 		opts, version, git_diff_format_email_options,
 		GIT_DIFF_FORMAT_EMAIL_OPTIONS_INIT);
 	return 0;
+}
+
+int git_diff_format_email_init_options(
+	git_diff_format_email_options *opts, unsigned int version)
+{
+	return git_diff_format_email_options_init(opts, version);
 }
 
 static int flush_hunk(git_oid *result, git_hash_ctx *ctx)
@@ -443,7 +460,7 @@ out:
 	return error;
 }
 
-static int line_cb(
+static int patchid_line_cb(
 	const git_diff_delta *delta,
 	const git_diff_hunk *hunk,
 	const git_diff_line *line,
@@ -465,6 +482,14 @@ static int line_cb(
 		break;
 	    case GIT_DIFF_LINE_CONTEXT:
 		break;
+	    case GIT_DIFF_LINE_CONTEXT_EOFNL:
+	    case GIT_DIFF_LINE_ADD_EOFNL:
+	    case GIT_DIFF_LINE_DEL_EOFNL:
+		/*
+		 * Ignore EOF without newlines for patch IDs as whitespace is
+		 * not supposed to be significant.
+		 */
+		return 0;
 	    default:
 		git_error_set(GIT_ERROR_PATCH, "invalid line origin for patch");
 		return -1;
@@ -481,7 +506,7 @@ out:
 	return error;
 }
 
-int git_diff_patchid_init_options(git_diff_patchid_options *opts, unsigned int version)
+int git_diff_patchid_options_init(git_diff_patchid_options *opts, unsigned int version)
 {
 	GIT_INIT_STRUCTURE_FROM_TEMPLATE(
 		opts, version, git_diff_patchid_options, GIT_DIFF_PATCHID_OPTIONS_INIT);
@@ -501,7 +526,7 @@ int git_diff_patchid(git_oid *out, git_diff *diff, git_diff_patchid_options *opt
 	if ((error = git_hash_ctx_init(&args.ctx)) < 0)
 		goto out;
 
-	if ((error = git_diff_foreach(diff, file_cb, NULL, NULL, line_cb, &args)) < 0)
+	if ((error = git_diff_foreach(diff, file_cb, NULL, NULL, patchid_line_cb, &args)) < 0)
 		goto out;
 
 	if ((error = (flush_hunk(&args.result, &args.ctx))) < 0)

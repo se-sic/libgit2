@@ -33,7 +33,19 @@ typedef struct {
 	char *old_prefix, *new_prefix;
 } git_patch_parsed;
 
-static int header_path_len(git_patch_parse_ctx *ctx)
+static int git_parse_err(const char *fmt, ...) GIT_FORMAT_PRINTF(1, 2);
+static int git_parse_err(const char *fmt, ...)
+{
+	va_list ap;
+
+	va_start(ap, fmt);
+	git_error_vset(GIT_ERROR_PATCH, fmt, ap);
+	va_end(ap);
+
+	return -1;
+}
+
+static size_t header_path_len(git_patch_parse_ctx *ctx)
 {
 	bool inquote = 0;
 	bool quoted = git_parse_ctx_contains_s(&ctx->parse_ctx, "\"");
@@ -328,7 +340,8 @@ static int parse_header_start(git_patch_parsed *patch, git_patch_parse_ctx *ctx)
 	 * proceeed here. We then hope for the "---" and "+++" lines to fix that
 	 * for us.
 	 */
-	if (!git_parse_ctx_contains(&ctx->parse_ctx, "\n", 1)) {
+	if (!git_parse_ctx_contains(&ctx->parse_ctx, "\n", 1) &&
+	    !git_parse_ctx_contains(&ctx->parse_ctx, "\r\n", 2)) {
 		git_parse_advance_chars(&ctx->parse_ctx, ctx->parse_ctx.line_len - 1);
 
 		git__free(patch->header_old_path);
@@ -376,6 +389,7 @@ static const parse_header_transition transitions[] = {
 	{ "index "              , STATE_DIFF,       STATE_INDEX,      parse_header_git_index },
 	{ "index "              , STATE_END,        STATE_INDEX,      parse_header_git_index },
 
+	{ "--- "                , STATE_DIFF,       STATE_PATH,       parse_header_git_oldpath },
 	{ "--- "                , STATE_INDEX,      STATE_PATH,       parse_header_git_oldpath },
 	{ "+++ "                , STATE_PATH,       STATE_END,        parse_header_git_newpath },
 	{ "GIT binary patch"    , STATE_INDEX,      STATE_END,        NULL },
@@ -393,6 +407,7 @@ static const parse_header_transition transitions[] = {
 	/* Next patch */
 	{ "diff --git "         , STATE_END,        0,                NULL },
 	{ "@@ -"                , STATE_END,        0,                NULL },
+	{ "-- "                 , STATE_INDEX,      0,                NULL },
 	{ "-- "                 , STATE_END,        0,                NULL },
 };
 
@@ -523,6 +538,14 @@ fail:
 	return -1;
 }
 
+static int eof_for_origin(int origin) {
+	if (origin == GIT_DIFF_LINE_ADDITION)
+		return GIT_DIFF_LINE_ADD_EOFNL;
+	if (origin == GIT_DIFF_LINE_DELETION)
+		return GIT_DIFF_LINE_DEL_EOFNL;
+	return GIT_DIFF_LINE_CONTEXT_EOFNL;
+}
+
 static int parse_hunk_body(
 	git_patch_parsed *patch,
 	git_patch_hunk *hunk,
@@ -533,6 +556,7 @@ static int parse_hunk_body(
 
 	int oldlines = hunk->hunk.old_lines;
 	int newlines = hunk->hunk.new_lines;
+	int last_origin = 0;
 
 	for (;
 		ctx->parse_ctx.remain_len > 1 &&
@@ -577,6 +601,21 @@ static int parse_hunk_body(
 			old_lineno = -1;
 			break;
 
+		case '\\':
+			/*
+			 * If there are no oldlines left, then this is probably
+			 * the "\ No newline at end of file" marker. Do not
+			 * verify its format, as it may be localized.
+			 */
+			if (!oldlines) {
+				prefix = 0;
+				origin = eof_for_origin(last_origin);
+				old_lineno = -1;
+				new_lineno = -1;
+				break;
+			}
+			/* fall through */
+
 		default:
 			error = git_parse_err("invalid patch hunk at line %"PRIuZ, ctx->parse_ctx.line_num);
 			goto done;
@@ -587,8 +626,8 @@ static int parse_hunk_body(
 
 		memset(line, 0x0, sizeof(git_diff_line));
 
-		line->content = ctx->parse_ctx.line + prefix;
 		line->content_len = ctx->parse_ctx.line_len - prefix;
+		line->content = git__strndup(ctx->parse_ctx.line + prefix, line->content_len);
 		line->content_offset = ctx->parse_ctx.content_len - ctx->parse_ctx.remain_len;
 		line->origin = origin;
 		line->num_lines = 1;
@@ -596,6 +635,8 @@ static int parse_hunk_body(
 		line->new_lineno = new_lineno;
 
 		hunk->line_count++;
+
+		last_origin = origin;
 	}
 
 	if (oldlines || newlines) {
@@ -605,7 +646,8 @@ static int parse_hunk_body(
 		goto done;
 	}
 
-	/* Handle "\ No newline at end of file".  Only expect the leading
+	/*
+	 * Handle "\ No newline at end of file". Only expect the leading
 	 * backslash, though, because the rest of the string could be
 	 * localized.  Because `diff` optimizes for the case where you
 	 * want to apply the patch by hand.
@@ -616,11 +658,24 @@ static int parse_hunk_body(
 		line = git_array_get(patch->base.lines, git_array_size(patch->base.lines) - 1);
 
 		if (line->content_len < 1) {
-			error = git_parse_err("cannot trim trailing newline of empty line");
+			error = git_parse_err("last line has no trailing newline");
 			goto done;
 		}
 
-		line->content_len--;
+		line = git_array_alloc(patch->base.lines);
+		GIT_ERROR_CHECK_ALLOC(line);
+
+		memset(line, 0x0, sizeof(git_diff_line));
+
+		line->content = git__strdup(ctx->parse_ctx.line);
+		line->content_len = ctx->parse_ctx.line_len;
+		line->content_offset = ctx->parse_ctx.content_len - ctx->parse_ctx.remain_len;
+		line->origin = eof_for_origin(last_origin);
+		line->num_lines = 1;
+		line->old_lineno = -1;
+		line->new_lineno = -1;
+
+		hunk->line_count++;
 
 		git_parse_advance_line(&ctx->parse_ctx);
 	}
@@ -921,21 +976,15 @@ static int check_filenames(git_patch_parsed *patch)
 		return git_parse_err("missing old path");
 
 	/* Ensure (non-renamed) paths match */
-	if (check_header_names(
-			patch->header_old_path, patch->old_path, "old", added) < 0 ||
-		check_header_names(
-			patch->header_new_path, patch->new_path, "new", deleted) < 0)
+	if (check_header_names(patch->header_old_path, patch->old_path, "old", added) < 0 ||
+	    check_header_names(patch->header_new_path, patch->new_path, "new", deleted) < 0)
 		return -1;
 
-	prefixed_old = (!added && patch->old_path) ? patch->old_path :
-		patch->header_old_path;
-	prefixed_new = (!deleted && patch->new_path) ? patch->new_path :
-		patch->header_new_path;
+	prefixed_old = (!added && patch->old_path) ? patch->old_path : patch->header_old_path;
+	prefixed_new = (!deleted && patch->new_path) ? patch->new_path : patch->header_new_path;
 
-	if (check_prefix(
-			&patch->old_prefix, &old_prefixlen, patch, prefixed_old) < 0 ||
-		check_prefix(
-			&patch->new_prefix, &new_prefixlen, patch, prefixed_new) < 0)
+	if ((prefixed_old && check_prefix(&patch->old_prefix, &old_prefixlen, patch, prefixed_old) < 0) ||
+	    (prefixed_new && check_prefix(&patch->new_prefix, &new_prefixlen, patch, prefixed_new) < 0))
 		return -1;
 
 	/* Prefer the rename filenames as they are unambiguous and unprefixed */
@@ -950,7 +999,7 @@ static int check_filenames(git_patch_parsed *patch)
 		patch->base.delta->new_file.path = prefixed_new + new_prefixlen;
 
 	if (!patch->base.delta->old_file.path &&
-		!patch->base.delta->new_file.path)
+	    !patch->base.delta->new_file.path)
 		return git_parse_err("git diff header lacks old / new paths");
 
 	return 0;
@@ -964,14 +1013,14 @@ static int check_patch(git_patch_parsed *patch)
 		return -1;
 
 	if (delta->old_file.path &&
-			delta->status != GIT_DELTA_DELETED &&
-			!delta->new_file.mode)
+	    delta->status != GIT_DELTA_DELETED &&
+	    !delta->new_file.mode)
 		delta->new_file.mode = delta->old_file.mode;
 
 	if (delta->status == GIT_DELTA_MODIFIED &&
-			!(delta->flags & GIT_DIFF_FLAG_BINARY) &&
-			delta->new_file.mode == delta->old_file.mode &&
-			git_array_size(patch->base.hunks) == 0)
+	    !(delta->flags & GIT_DIFF_FLAG_BINARY) &&
+	    delta->new_file.mode == delta->old_file.mode &&
+	    git_array_size(patch->base.hunks) == 0)
 		return git_parse_err("patch with no hunks");
 
 	if (delta->status == GIT_DELTA_ADDED) {
@@ -1043,6 +1092,8 @@ int git_patch_parsed_from_diff(git_patch **out, git_diff *d, size_t idx)
 static void patch_parsed__free(git_patch *p)
 {
 	git_patch_parsed *patch = (git_patch_parsed *)p;
+	git_diff_line *line;
+	size_t i;
 
 	if (!patch)
 		return;
@@ -1052,6 +1103,8 @@ static void patch_parsed__free(git_patch *p)
 	git__free((char *)patch->base.binary.old_file.data);
 	git__free((char *)patch->base.binary.new_file.data);
 	git_array_clear(patch->base.hunks);
+	git_array_foreach(patch->base.lines, i, line)
+		git__free((char *) line->content);
 	git_array_clear(patch->base.lines);
 	git__free(patch->base.delta);
 

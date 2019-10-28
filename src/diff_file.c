@@ -12,7 +12,7 @@
 #include "diff.h"
 #include "diff_generate.h"
 #include "odb.h"
-#include "fileops.h"
+#include "futils.h"
 #include "filter.h"
 
 #define DIFF_MAX_FILESIZE 0x20000000
@@ -232,7 +232,7 @@ static int diff_file_content_load_blob(
 	int error = 0;
 	git_odb_object *odb_obj = NULL;
 
-	if (git_oid_iszero(&fc->file->id))
+	if (git_oid_is_zero(&fc->file->id))
 		return 0;
 
 	if (fc->file->mode == GIT_FILEMODE_COMMIT)
@@ -290,8 +290,8 @@ static int diff_file_content_load_workdir_symlink(
 	ssize_t alloc_len, read_len;
 	int symlink_supported, error;
 
-	if ((error = git_repository__cvar(
-		&symlink_supported, fc->repo, GIT_CVAR_SYMLINKS)) < 0)
+	if ((error = git_repository__configmap_lookup(
+		&symlink_supported, fc->repo, GIT_CONFIGMAP_SYMLINKS)) < 0)
 		return -1;
 
 	if (!symlink_supported)

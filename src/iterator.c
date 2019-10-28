@@ -145,7 +145,7 @@ static int iterator_init_common(
 		(iter->flags & GIT_ITERATOR_PRECOMPOSE_UNICODE) == 0 &&
 		(iter->flags & GIT_ITERATOR_DONT_PRECOMPOSE_UNICODE) == 0) {
 
-		if (git_repository__cvar(&precompose, repo, GIT_CVAR_PRECOMPOSE) < 0)
+		if (git_repository__configmap_lookup(&precompose, repo, GIT_CONFIGMAP_PRECOMPOSE) < 0)
 			git_error_clear();
 		else if (precompose)
 			iter->flags |= GIT_ITERATOR_PRECOMPOSE_UNICODE;
@@ -543,8 +543,6 @@ static int tree_iterator_frame_init(
 	new_frame = git_array_alloc(iter->frames);
 	GIT_ERROR_CHECK_ALLOC(new_frame);
 
-	memset(new_frame, 0, sizeof(tree_iterator_frame));
-
 	if ((error = git_tree_dup(&dup, tree)) < 0)
 		goto done;
 
@@ -552,19 +550,22 @@ static int tree_iterator_frame_init(
 	new_frame->tree = dup;
 
 	if (frame_entry &&
-		(error = tree_iterator_compute_path(&new_frame->path, frame_entry)) < 0)
+	    (error = tree_iterator_compute_path(&new_frame->path, frame_entry)) < 0)
 		goto done;
 
 	cmp = iterator__ignore_case(&iter->base) ?
 		tree_iterator_entry_sort_icase : NULL;
 
-	if ((error = git_vector_init(
-		&new_frame->entries, dup->entries.size, cmp)) < 0)
+	if ((error = git_vector_init(&new_frame->entries,
+				     dup->entries.size, cmp)) < 0)
 		goto done;
 
 	git_array_foreach(dup->entries, i, tree_entry) {
-		new_entry = git_pool_malloc(&iter->entry_pool, 1);
-		GIT_ERROR_CHECK_ALLOC(new_entry);
+		if ((new_entry = git_pool_malloc(&iter->entry_pool, 1)) == NULL) {
+			git_error_set_oom();
+			error = -1;
+			goto done;
+		}
 
 		new_entry->tree_entry = tree_entry;
 		new_entry->parent_path = new_frame->path.ptr;
@@ -1521,7 +1522,7 @@ static void filesystem_iterator_set_current(
 static int filesystem_iterator_current(
 	const git_index_entry **out, git_iterator *i)
 {
-	filesystem_iterator *iter = (filesystem_iterator *)i;
+	filesystem_iterator *iter = GIT_CONTAINER_OF(i, filesystem_iterator, base);
 
 	if (!iterator__has_been_accessed(i))
 		return iter->base.cb->advance(out, i);
@@ -1568,7 +1569,7 @@ done:
 static int filesystem_iterator_advance(
 	const git_index_entry **out, git_iterator *i)
 {
-	filesystem_iterator *iter = (filesystem_iterator *)i;
+	filesystem_iterator *iter = GIT_CONTAINER_OF(i, filesystem_iterator, base);
 	bool is_dir;
 	int error = 0;
 
@@ -1627,7 +1628,7 @@ static int filesystem_iterator_advance(
 static int filesystem_iterator_advance_into(
 	const git_index_entry **out, git_iterator *i)
 {
-	filesystem_iterator *iter = (filesystem_iterator *)i;
+	filesystem_iterator *iter = GIT_CONTAINER_OF(i, filesystem_iterator, base);
 	filesystem_iterator_frame *frame;
 	filesystem_iterator_entry *prev_entry;
 	int error;
@@ -1664,7 +1665,7 @@ static int filesystem_iterator_advance_into(
 
 int git_iterator_current_workdir_path(git_buf **out, git_iterator *i)
 {
-	filesystem_iterator *iter = (filesystem_iterator *)i;
+	filesystem_iterator *iter = GIT_CONTAINER_OF(i, filesystem_iterator, base);
 	const git_index_entry *entry;
 
 	if (i->type != GIT_ITERATOR_TYPE_FS &&
@@ -1724,15 +1725,19 @@ GIT_INLINE(bool) filesystem_iterator_current_is_ignored(
 
 bool git_iterator_current_is_ignored(git_iterator *i)
 {
+	filesystem_iterator *iter = NULL;
+
 	if (i->type != GIT_ITERATOR_TYPE_WORKDIR)
 		return false;
 
-	return filesystem_iterator_current_is_ignored((filesystem_iterator *)i);
+	iter = GIT_CONTAINER_OF(i, filesystem_iterator, base);
+
+	return filesystem_iterator_current_is_ignored(iter);
 }
 
 bool git_iterator_current_tree_is_ignored(git_iterator *i)
 {
-	filesystem_iterator *iter = (filesystem_iterator *)i;
+	filesystem_iterator *iter = GIT_CONTAINER_OF(i, filesystem_iterator, base);
 	filesystem_iterator_frame *frame;
 
 	if (i->type != GIT_ITERATOR_TYPE_WORKDIR)
@@ -1747,7 +1752,7 @@ static int filesystem_iterator_advance_over(
 	git_iterator_status_t *status,
 	git_iterator *i)
 {
-	filesystem_iterator *iter = (filesystem_iterator *)i;
+	filesystem_iterator *iter = GIT_CONTAINER_OF(i, filesystem_iterator, base);
 	filesystem_iterator_frame *current_frame;
 	filesystem_iterator_entry *current_entry;
 	const git_index_entry *entry = NULL;
@@ -1866,7 +1871,7 @@ static int filesystem_iterator_init(filesystem_iterator *iter)
 
 static int filesystem_iterator_reset(git_iterator *i)
 {
-	filesystem_iterator *iter = (filesystem_iterator *)i;
+	filesystem_iterator *iter = GIT_CONTAINER_OF(i, filesystem_iterator, base);
 
 	filesystem_iterator_clear(iter);
 	return filesystem_iterator_init(iter);
@@ -1874,7 +1879,7 @@ static int filesystem_iterator_reset(git_iterator *i)
 
 static void filesystem_iterator_free(git_iterator *i)
 {
-	filesystem_iterator *iter = (filesystem_iterator *)i;
+	filesystem_iterator *iter = GIT_CONTAINER_OF(i, filesystem_iterator, base);
 	git__free(iter->root);
 	git_buf_dispose(&iter->current_path);
 	git_tree_free(iter->tree);
@@ -2083,7 +2088,7 @@ static int index_iterator_skip_pseudotree(index_iterator *iter)
 static int index_iterator_advance(
 	const git_index_entry **out, git_iterator *i)
 {
-	index_iterator *iter = (index_iterator *)i;
+	index_iterator *iter = GIT_CONTAINER_OF(i, index_iterator, base);
 	const git_index_entry *entry = NULL;
 	bool is_submodule;
 	int error = 0;
@@ -2156,7 +2161,7 @@ static int index_iterator_advance(
 static int index_iterator_advance_into(
 	const git_index_entry **out, git_iterator *i)
 {
-	index_iterator *iter = (index_iterator *)i;
+	index_iterator *iter = GIT_CONTAINER_OF(i, index_iterator, base);
 
 	if (! S_ISDIR(iter->tree_entry.mode)) {
 		if (out)
@@ -2174,7 +2179,7 @@ static int index_iterator_advance_over(
 	git_iterator_status_t *status,
 	git_iterator *i)
 {
-	index_iterator *iter = (index_iterator *)i;
+	index_iterator *iter = GIT_CONTAINER_OF(i, index_iterator, base);
 	const git_index_entry *entry;
 	int error;
 
@@ -2203,7 +2208,7 @@ static int index_iterator_init(index_iterator *iter)
 
 static int index_iterator_reset(git_iterator *i)
 {
-	index_iterator *iter = (index_iterator *)i;
+	index_iterator *iter = GIT_CONTAINER_OF(i, index_iterator, base);
 
 	index_iterator_clear(iter);
 	return index_iterator_init(iter);
@@ -2211,7 +2216,7 @@ static int index_iterator_reset(git_iterator *i)
 
 static void index_iterator_free(git_iterator *i)
 {
-	index_iterator *iter = (index_iterator *)i;
+	index_iterator *iter = GIT_CONTAINER_OF(i, index_iterator, base);
 
 	git_index_snapshot_release(&iter->entries, iter->base.index);
 	git_buf_dispose(&iter->tree_buf);

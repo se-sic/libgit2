@@ -570,11 +570,11 @@ int git_index_set_caps(git_index *index, int caps)
 			return create_index_error(
 				-1, "cannot access repository to set index caps");
 
-		if (!git_repository__cvar(&val, repo, GIT_CVAR_IGNORECASE))
+		if (!git_repository__configmap_lookup(&val, repo, GIT_CONFIGMAP_IGNORECASE))
 			index->ignore_case = (val != 0);
-		if (!git_repository__cvar(&val, repo, GIT_CVAR_FILEMODE))
+		if (!git_repository__configmap_lookup(&val, repo, GIT_CONFIGMAP_FILEMODE))
 			index->distrust_filemode = (val == 0);
-		if (!git_repository__cvar(&val, repo, GIT_CVAR_SYMLINKS))
+		if (!git_repository__configmap_lookup(&val, repo, GIT_CONFIGMAP_SYMLINKS))
 			index->no_symlinks = (val == 0);
 	}
 	else {
@@ -1454,7 +1454,7 @@ GIT_INLINE(bool) valid_filemode(const int filemode)
 	return (is_file_or_link(filemode) || filemode == GIT_FILEMODE_COMMIT);
 }
 
-int git_index_add_frombuffer(
+int git_index_add_from_buffer(
     git_index *index, const git_index_entry *source_entry,
     const void *buffer, size_t len)
 {
@@ -1474,17 +1474,22 @@ int git_index_add_frombuffer(
 		return -1;
 	}
 
+	if (len > UINT32_MAX) {
+		git_error_set(GIT_ERROR_INDEX, "buffer is too large");
+		return -1;
+	}
+
 	if (index_entry_dup(&entry, index, source_entry) < 0)
 		return -1;
 
-	error = git_blob_create_frombuffer(&id, INDEX_OWNER(index), buffer, len);
+	error = git_blob_create_from_buffer(&id, INDEX_OWNER(index), buffer, len);
 	if (error < 0) {
 		index_entry_free(entry);
 		return error;
 	}
 
 	git_oid_cpy(&entry->id, &id);
-	entry->file_size = len;
+	entry->file_size = (uint32_t)len;
 
 	if ((error = index_insert(index, &entry, 1, true, true, true)) < 0)
 		return error;
@@ -3708,4 +3713,13 @@ void git_indexwriter_cleanup(git_indexwriter *writer)
 
 	git_index_free(writer->index);
 	writer->index = NULL;
+}
+
+/* Deprecated functions */
+
+int git_index_add_frombuffer(
+    git_index *index, const git_index_entry *source_entry,
+    const void *buffer, size_t len)
+{
+	return git_index_add_from_buffer(index, source_entry, buffer, len);
 }

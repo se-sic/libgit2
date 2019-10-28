@@ -14,6 +14,14 @@
 
 #include <assert.h>
 #include <stdio.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#ifdef _WIN32
+# include <io.h>
+#else
+# include <fcntl.h>
+# include <unistd.h>
+#endif
 #include <string.h>
 #include <errno.h>
 
@@ -330,38 +338,98 @@ error:
 	return error;
 }
 
+static int ask(char **out, const char *prompt, char optional)
+{
+	printf("%s ", prompt);
+	fflush(stdout);
+
+	if (!readline(out) && !optional) {
+		fprintf(stderr, "Could not read response: %s", strerror(errno));
+		return -1;
+	}
+
+	return 0;
+}
+
 int cred_acquire_cb(git_cred **out,
 		const char *url,
 		const char *username_from_url,
 		unsigned int allowed_types,
 		void *payload)
 {
-	char *username = NULL, *password = NULL;
-	int error;
+	char *username = NULL, *password = NULL, *privkey = NULL, *pubkey = NULL;
+	int error = 1;
 
 	UNUSED(url);
-	UNUSED(username_from_url);
-	UNUSED(allowed_types);
 	UNUSED(payload);
 
-	printf("Username: ");
-	if (readline(&username) < 0) {
-		fprintf(stderr, "Unable to read username: %s", strerror(errno));
-		return -1;
+	if (username_from_url) {
+		if ((username = strdup(username_from_url)) == NULL)
+			goto out;
+	} else if ((error = ask(&username, "Username:", 0)) < 0) {
+		goto out;
 	}
 
-	/* Yup. Right there on your terminal. Careful where you copy/paste output. */
-	printf("Password: ");
-	if (readline(&password) < 0) {
-		fprintf(stderr, "Unable to read password: %s", strerror(errno));
-		free(username);
-		return -1;
+	if (allowed_types & GIT_CREDTYPE_SSH_KEY) {
+		int n;
+
+		if ((error = ask(&privkey, "SSH Key:", 0)) < 0 ||
+		    (error = ask(&password, "Password:", 1)) < 0)
+			goto out;
+
+		if ((n = snprintf(NULL, 0, "%s.pub", privkey)) < 0 ||
+		    (pubkey = malloc(n + 1)) == NULL ||
+		    (n = snprintf(pubkey, n + 1, "%s.pub", privkey)) < 0)
+			goto out;
+
+		error = git_cred_ssh_key_new(out, username, pubkey, privkey, password);
+	} else if (allowed_types & GIT_CREDTYPE_USERPASS_PLAINTEXT) {
+		if ((error = ask(&password, "Password:", 1)) < 0)
+			goto out;
+
+		error = git_cred_userpass_plaintext_new(out, username, password);
+	} else if (allowed_types & GIT_CREDTYPE_USERNAME) {
+		error = git_cred_username_new(out, username);
 	}
 
-	error = git_cred_userpass_plaintext_new(out, username, password);
-
+out:
 	free(username);
 	free(password);
-
+	free(privkey);
+	free(pubkey);
 	return error;
 }
+
+char *read_file(const char *path)
+{
+	ssize_t total = 0;
+	char *buf = NULL;
+	struct stat st;
+	int fd = -1;
+
+	if ((fd = open(path, O_RDONLY)) < 0 || fstat(fd, &st) < 0)
+		goto out;
+
+	if ((buf = malloc(st.st_size + 1)) == NULL)
+		goto out;
+
+	while (total < st.st_size) {
+		ssize_t bytes = read(fd, buf + total, st.st_size - total);
+		if (bytes <= 0) {
+			if (errno == EAGAIN || errno == EINTR)
+				 continue;
+			free(buf);
+			buf = NULL;
+			goto out;
+		}
+		total += bytes;
+	}
+
+	buf[total] = '\0';
+
+out:
+	if (fd >= 0)
+		close(fd);
+	return buf;
+}
+

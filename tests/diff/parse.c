@@ -78,6 +78,36 @@ void test_diff_parse__exact_rename(void)
 	git_diff_free(diff);
 }
 
+void test_diff_parse__empty_file(void)
+{
+	const char *content =
+	    "---\n"
+	    " file | 0\n"
+	    " 1 file changed, 0 insertions(+), 0 deletions(-)\n"
+	    " created mode 100644 file\n"
+	    "\n"
+	    "diff --git a/file b/file\n"
+	    "new file mode 100644\n"
+	    "index 0000000..e69de29\n"
+	    "-- \n"
+	    "2.20.1\n";
+	git_diff *diff;
+
+	cl_git_pass(git_diff_from_buffer(
+		&diff, content, strlen(content)));
+	git_diff_free(diff);
+}
+
+void test_diff_parse__no_extended_headers(void)
+{
+	const char *content = PATCH_NO_EXTENDED_HEADERS;
+	git_diff *diff;
+
+	cl_git_pass(git_diff_from_buffer(
+		&diff, content, strlen(content)));
+	git_diff_free(diff);
+}
+
 void test_diff_parse__invalid_patches_fails(void)
 {
 	test_parse_invalid_diff(PATCH_CORRUPT_MISSING_NEW_FILE);
@@ -355,6 +385,43 @@ void test_diff_parse__lineinfo(void)
 	cl_git_assert_lineinfo(9, 9, 1, patch, 0, l++);
 
 	cl_assert_equal_i(n, l);
+
+	git_patch_free(patch);
+	git_diff_free(diff);
+}
+
+
+void test_diff_parse__new_file_with_space(void)
+{
+	const char *content = PATCH_ORIGINAL_NEW_FILE_WITH_SPACE;
+	git_patch *patch;
+	git_diff *diff;
+
+	cl_git_pass(git_diff_from_buffer(&diff, content, strlen(content)));
+	cl_git_pass(git_patch_from_diff((git_patch **) &patch, diff, 0));
+
+	cl_assert_equal_p(patch->diff_opts.old_prefix, NULL);
+	cl_assert_equal_p(patch->delta->old_file.path, NULL);
+	cl_assert_equal_s(patch->diff_opts.new_prefix, "b/");
+	cl_assert_equal_s(patch->delta->new_file.path, "sp ace.txt");
+
+	git_patch_free(patch);
+	git_diff_free(diff);
+}
+
+void test_diff_parse__crlf(void)
+{
+	const char *text = PATCH_CRLF;
+	git_diff *diff;
+	git_patch *patch;
+	const git_diff_delta *delta;
+
+	cl_git_pass(git_diff_from_buffer(&diff, text, strlen(text)));
+	cl_git_pass(git_patch_from_diff(&patch, diff, 0));
+	delta = git_patch_get_delta(patch);
+
+	cl_assert_equal_s(delta->old_file.path, "test-file");
+	cl_assert_equal_s(delta->new_file.path, "test-file");
 
 	git_patch_free(patch);
 	git_diff_free(diff);

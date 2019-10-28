@@ -23,11 +23,10 @@ typedef struct {
 	size_t line_num;
 } git_parse_ctx;
 
+#define GIT_PARSE_CTX_INIT { 0 }
+
 int git_parse_ctx_init(git_parse_ctx *ctx, const char *content, size_t content_len);
 void git_parse_ctx_clear(git_parse_ctx *ctx);
-
-#define git_parse_err(...) \
-	( git_error_set(GIT_ERROR_PATCH, __VA_ARGS__), -1 )
 
 #define git_parse_ctx_contains_s(ctx, str) \
 	git_parse_ctx_contains(ctx, str, sizeof(str) - 1)
