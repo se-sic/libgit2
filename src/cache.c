@@ -41,27 +41,6 @@ int git_cache_set_max_object_size(git_object_t type, size_t size)
 	return 0;
 }
 
-void git_cache_dump_stats(git_cache *cache)
-{
-	git_cached_obj *object;
-
-	if (git_cache_size(cache) == 0)
-		return;
-
-	printf("Cache %p: %"PRIuZ" items cached, %"PRIdZ" bytes\n",
-		cache, git_cache_size(cache), cache->used_memory);
-
-	git_oidmap_foreach_value(cache->map, object, {
-		char oid_str[9];
-		printf(" %s%c %s (%"PRIuZ")\n",
-			git_object_type2string(object->type),
-			object->flags == GIT_CACHE_STORE_PARSED ? '*' : ' ',
-			git_oid_tostr(oid_str, sizeof(oid_str), &object->oid),
-			object->size
-		);
-	});
-}
-
 int git_cache_init(git_cache *cache)
 {
 	memset(cache, 0, sizeof(*cache));
@@ -208,10 +187,14 @@ static void *cache_store(git_cache *cache, git_cached_obj *entry)
 			entry = stored_entry;
 		} else if (stored_entry->flags == GIT_CACHE_STORE_RAW &&
 			   entry->flags == GIT_CACHE_STORE_PARSED) {
-			git_cached_obj_decref(stored_entry);
-			git_cached_obj_incref(entry);
-
-			git_oidmap_set(cache->map, &entry->oid, entry);
+			if (git_oidmap_set(cache->map, &entry->oid, entry) == 0) {
+				git_cached_obj_decref(stored_entry);
+				git_cached_obj_incref(entry);
+			} else {
+				git_cached_obj_decref(entry);
+				git_cached_obj_incref(stored_entry);
+				entry = stored_entry;
+			}
 		} else {
 			/* NO OP */
 		}

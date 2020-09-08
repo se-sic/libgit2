@@ -958,7 +958,7 @@ cleanup:
 	return error;
 }
 
-const char *git_submodule_update_to_str(git_submodule_update_t update)
+static const char *submodule_update_to_str(git_submodule_update_t update)
 {
 	int i;
 	for (i = 0; i < (int)ARRAY_SIZE(_sm_update_map); ++i)
@@ -1240,10 +1240,12 @@ int git_submodule_update_options_init(git_submodule_update_options *opts, unsign
 	return 0;
 }
 
+#ifndef GIT_DEPRECATE_HARD
 int git_submodule_update_init_options(git_submodule_update_options *opts, unsigned int version)
 {
 	return git_submodule_update_options_init(opts, version);
 }
+#endif
 
 int git_submodule_update(git_submodule *sm, int init, git_submodule_update_options *_update_options)
 {
@@ -1401,7 +1403,7 @@ int git_submodule_init(git_submodule *sm, int overwrite)
 	/* write "submodule.NAME.update" if not default */
 
 	val = (sm->update == GIT_SUBMODULE_UPDATE_CHECKOUT) ?
-		NULL : git_submodule_update_to_str(sm->update);
+		NULL : submodule_update_to_str(sm->update);
 
 	if ((error = git_buf_printf(&key, "submodule.%s.update", sm->name)) < 0 ||
 		(error = git_config__update_entry(
@@ -1420,50 +1422,46 @@ cleanup:
 
 int git_submodule_sync(git_submodule *sm)
 {
-	int error = 0;
-	git_config *cfg = NULL;
-	git_buf key = GIT_BUF_INIT;
+	git_buf key = GIT_BUF_INIT, url = GIT_BUF_INIT, remote_name = GIT_BUF_INIT;
 	git_repository *smrepo = NULL;
+	git_config *cfg = NULL;
+	int error = 0;
 
 	if (!sm->url) {
-		git_error_set(GIT_ERROR_SUBMODULE,
-			"no URL configured for submodule '%s'", sm->name);
+		git_error_set(GIT_ERROR_SUBMODULE, "no URL configured for submodule '%s'", sm->name);
 		return -1;
 	}
 
 	/* copy URL over to config only if it already exists */
+	if ((error = git_repository_config__weakptr(&cfg, sm->repo)) < 0 ||
+	    (error = git_buf_printf(&key, "submodule.%s.url", sm->name)) < 0 ||
+	    (error = git_submodule_resolve_url(&url, sm->repo, sm->url)) < 0 ||
+	    (error = git_config__update_entry(cfg, key.ptr, url.ptr, true, true)) < 0)
+		goto out;
 
-	if (!(error = git_repository_config__weakptr(&cfg, sm->repo)) &&
-		!(error = git_buf_printf(&key, "submodule.%s.url", sm->name)))
-		error = git_config__update_entry(cfg, key.ptr, sm->url, true, true);
+	if (!(sm->flags & GIT_SUBMODULE_STATUS_IN_WD))
+		goto out;
 
 	/* if submodule exists in the working directory, update remote url */
+	if ((error = git_submodule_open(&smrepo, sm)) < 0 ||
+	    (error = git_repository_config__weakptr(&cfg, smrepo)) < 0)
+		goto out;
 
-	if (!error &&
-		(sm->flags & GIT_SUBMODULE_STATUS_IN_WD) != 0 &&
-		!(error = git_submodule_open(&smrepo, sm)))
-	{
-		git_buf remote_name = GIT_BUF_INIT;
-
-		if ((error = git_repository_config__weakptr(&cfg, smrepo)) < 0)
-			/* return error from reading submodule config */;
-		else if ((error = lookup_head_remote_key(&remote_name, smrepo)) < 0) {
-			git_error_clear();
-			error = git_buf_sets(&key, "remote.origin.url");
-		} else {
-			error = git_buf_join3(
-				&key, '.', "remote", remote_name.ptr, "url");
-			git_buf_dispose(&remote_name);
-		}
-
-		if (!error)
-			error = git_config__update_entry(cfg, key.ptr, sm->url, true, false);
-
-		git_repository_free(smrepo);
+	if (lookup_head_remote_key(&remote_name, smrepo) == 0) {
+		if ((error = git_buf_join3(&key, '.', "remote", remote_name.ptr, "url")) < 0)
+			goto out;
+	} else if ((error = git_buf_sets(&key, "remote.origin.url")) < 0) {
+		goto out;
 	}
 
-	git_buf_dispose(&key);
+	if ((error = git_config__update_entry(cfg, key.ptr, url.ptr, true, false)) < 0)
+		goto out;
 
+out:
+	git_repository_free(smrepo);
+	git_buf_dispose(&remote_name);
+	git_buf_dispose(&key);
+	git_buf_dispose(&url);
 	return error;
 }
 
@@ -1606,43 +1604,40 @@ static int submodule_update_head(git_submodule *submodule)
 
 int git_submodule_reload(git_submodule *sm, int force)
 {
-	int error = 0, isvalid;
-	git_config *mods;
+	git_config *mods = NULL;
+	int error;
 
 	GIT_UNUSED(force);
 
 	assert(sm);
 
-	isvalid = git_submodule_name_is_valid(sm->repo, sm->name, 0);
-	if (isvalid <= 0) {
+	if ((error = git_submodule_name_is_valid(sm->repo, sm->name, 0)) <= 0)
 		/* This should come with a warning, but we've no API for that */
-		return isvalid;
-	}
+		goto out;
 
-	if (!git_repository_is_bare(sm->repo)) {
-		/* refresh config data */
-		if ((error = gitmodules_snapshot(&mods, sm->repo)) < 0 && error != GIT_ENOTFOUND)
-			return error;
-		if (mods != NULL) {
-			error = submodule_read_config(sm, mods);
-			git_config_free(mods);
+	if (git_repository_is_bare(sm->repo))
+		goto out;
 
-			if (error < 0)
-				return error;
-		}
+	/* refresh config data */
+	if ((error = gitmodules_snapshot(&mods, sm->repo)) < 0 && error != GIT_ENOTFOUND)
+		goto out;
 
-		/* refresh wd data */
-		sm->flags &=
-			~(GIT_SUBMODULE_STATUS_IN_WD |
-			  GIT_SUBMODULE_STATUS__WD_OID_VALID |
-			  GIT_SUBMODULE_STATUS__WD_FLAGS);
+	if (mods != NULL && (error = submodule_read_config(sm, mods)) < 0)
+		goto out;
 
-		error = submodule_load_from_wd_lite(sm);
-	}
+	/* refresh wd data */
+	sm->flags &=
+		~(GIT_SUBMODULE_STATUS_IN_WD |
+		  GIT_SUBMODULE_STATUS__WD_OID_VALID |
+		  GIT_SUBMODULE_STATUS__WD_FLAGS);
 
-	if (error == 0 && (error = submodule_update_index(sm)) == 0)
-		error = submodule_update_head(sm);
+	if ((error = submodule_load_from_wd_lite(sm)) < 0 ||
+	    (error = submodule_update_index(sm)) < 0 ||
+	    (error = submodule_update_head(sm)) < 0)
+		goto out;
 
+out:
+	git_config_free(mods);
 	return error;
 }
 
@@ -1845,7 +1840,7 @@ int git_submodule_parse_update(git_submodule_update_t *out, const char *value)
 	return 0;
 }
 
-int git_submodule_parse_recurse(git_submodule_recurse_t *out, const char *value)
+static int submodule_parse_recurse(git_submodule_recurse_t *out, const char *value)
 {
 	int val;
 
@@ -1941,7 +1936,7 @@ static int submodule_read_config(git_submodule *sm, git_config *cfg)
 
 	if ((error = get_value(&value, cfg, &key, sm->name, "fetchRecurseSubmodules")) == 0) {
 		in_config = 1;
-		if ((error = git_submodule_parse_recurse(&sm->fetch_recurse, value)) < 0)
+		if ((error = submodule_parse_recurse(&sm->fetch_recurse, value)) < 0)
 			goto cleanup;
 		sm->fetch_recurse_default = sm->fetch_recurse;
 	} else if (error != GIT_ENOTFOUND) {
@@ -2168,7 +2163,7 @@ static int lookup_default_remote(git_remote **remote, git_repository *repo)
 	int error = lookup_head_remote(remote, repo);
 
 	/* if that failed, use 'origin' instead */
-	if (error == GIT_ENOTFOUND)
+	if (error == GIT_ENOTFOUND || error == GIT_EUNBORNBRANCH)
 		error = git_remote_lookup(remote, repo, "origin");
 
 	if (error == GIT_ENOTFOUND)

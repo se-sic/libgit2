@@ -238,9 +238,9 @@ int git_pathspec__init(git_pathspec *ps, const git_strarray *paths)
 	memset(ps, 0, sizeof(*ps));
 
 	ps->prefix = git_pathspec_prefix(paths);
-	git_pool_init(&ps->pool, 1);
 
-	if ((error = git_pathspec__vinit(&ps->pathspec, paths, &ps->pool)) < 0)
+	if ((error = git_pool_init(&ps->pool, 1)) < 0 ||
+	    (error = git_pathspec__vinit(&ps->pathspec, paths, &ps->pool)) < 0)
 		git_pathspec__clear(ps);
 
 	return error;
@@ -316,7 +316,8 @@ static git_pathspec_match_list *pathspec_match_alloc(
 	if (!m)
 		return NULL;
 
-	git_pool_init(&m->pool, 1);
+	if (git_pool_init(&m->pool, 1) < 0)
+		return NULL;
 
 	/* need to keep reference to pathspec and increment refcount because
 	 * failures array stores pointers to the pattern strings of the
@@ -422,7 +423,7 @@ static int pathspec_match_from_iterator(
 	if ((error = git_iterator_reset_range(iter, ps->prefix, ps->prefix)) < 0)
 		goto done;
 
-	if (git_iterator_type(iter) == GIT_ITERATOR_TYPE_WORKDIR &&
+	if (git_iterator_type(iter) == GIT_ITERATOR_WORKDIR &&
 		(error = git_repository_index__weakptr(
 			&index, git_iterator_owner(iter))) < 0)
 		goto done;

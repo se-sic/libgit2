@@ -110,6 +110,8 @@ int git_mempack_dump(git_buf *pack, git_repository *repo, git_odb_backend *_back
 	if (git_packbuilder_new(&packbuilder, repo) < 0)
 		return -1;
 
+	git_packbuilder_set_threads(packbuilder, 0);
+
 	for (i = 0; i < db->commits.size; ++i) {
 		struct memobject *commit = db->commits.ptr[i];
 
@@ -125,7 +127,7 @@ cleanup:
 	return err;
 }
 
-void git_mempack_reset(git_odb_backend *_backend)
+int git_mempack_reset(git_odb_backend *_backend)
 {
 	struct memory_packer_db *db = (struct memory_packer_db *)_backend;
 	struct memobject *object = NULL;
@@ -137,6 +139,8 @@ void git_mempack_reset(git_odb_backend *_backend)
 	git_array_clear(db->commits);
 
 	git_oidmap_clear(db->objects);
+
+	return 0;
 }
 
 static void impl__free(git_odb_backend *_backend)

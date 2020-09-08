@@ -11,6 +11,11 @@ SOURCE_DIR=${SOURCE_DIR:-$( cd "$( dirname "${BASH_SOURCE[0]}" )" && dirname $( 
 BUILD_DIR=$(pwd)
 BUILD_PATH=${BUILD_PATH:=$PATH}
 CMAKE=$(which cmake)
+CMAKE_GENERATOR=${CMAKE_GENERATOR:-Unix Makefiles}
+
+if [[ "$(uname -s)" == MINGW* ]]; then
+	BUILD_PATH=$(cygpath "$BUILD_PATH")
+fi
 
 indent() { sed "s/^/    /"; }
 
@@ -25,18 +30,25 @@ fi
 
 if [ -f "/etc/debian_version" ]; then
 	echo "Debian version:"
-	lsb_release -a | indent
+	(source /etc/lsb-release && echo "${DISTRIB_DESCRIPTION}") | indent
 fi
 
 echo "Kernel version:"
 uname -a 2>&1 | indent
 
 echo "CMake version:"
-env PATH="$BUILD_PATH" "$CMAKE" --version 2>&1 | indent
+env PATH="${BUILD_PATH}" "${CMAKE}" --version 2>&1 | indent
 
-if test -n "$CC"; then
+if test -n "${CC}"; then
 	echo "Compiler version:"
-	"$CC" --version 2>&1 | indent
+	"${CC}" --version 2>&1 | indent
+fi
+echo "Environment:"
+if test -n "${CC}"; then
+	echo "CC=${CC}" | indent
+fi
+if test -n "${CFLAGS}"; then
+	echo "CFLAGS=${CFLAGS}" | indent
 fi
 echo ""
 
@@ -44,12 +56,12 @@ echo "##########################################################################
 echo "## Configuring build environment"
 echo "##############################################################################"
 
-echo cmake ${SOURCE_DIR} -DENABLE_WERROR=ON -DBUILD_EXAMPLES=ON -DBUILD_FUZZERS=ON -DUSE_STANDALONE_FUZZERS=ON -G \"${CMAKE_GENERATOR}\" ${CMAKE_OPTIONS}
-env PATH="$BUILD_PATH" "$CMAKE" ${SOURCE_DIR} -DENABLE_WERROR=ON -DBUILD_EXAMPLES=ON -DBUILD_FUZZERS=ON -DUSE_STANDALONE_FUZZERS=ON -G "${CMAKE_GENERATOR}" ${CMAKE_OPTIONS}
+echo cmake -DENABLE_WERROR=ON -DBUILD_EXAMPLES=ON -DBUILD_FUZZERS=ON -DUSE_STANDALONE_FUZZERS=ON -G \"${CMAKE_GENERATOR}\" ${CMAKE_OPTIONS} -S \"${SOURCE_DIR}\"
+env PATH="${BUILD_PATH}" "${CMAKE}" -DENABLE_WERROR=ON -DBUILD_EXAMPLES=ON -DBUILD_FUZZERS=ON -DUSE_STANDALONE_FUZZERS=ON -G "${CMAKE_GENERATOR}" ${CMAKE_OPTIONS} -S "${SOURCE_DIR}"
 
 echo ""
 echo "##############################################################################"
 echo "## Building libgit2"
 echo "##############################################################################"
 
-env PATH="$BUILD_PATH" "$CMAKE" --build .
+env PATH="${BUILD_PATH}" "${CMAKE}" --build .

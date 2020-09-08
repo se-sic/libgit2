@@ -86,7 +86,8 @@ int git_object__from_raw(
 	GIT_ERROR_CHECK_ALLOC(object);
 	object->cached.flags = GIT_CACHE_STORE_PARSED;
 	object->cached.type = type;
-	git_odb_hash(&object->cached.oid, data, size, type);
+	if ((error = git_odb_hash(&object->cached.oid, data, size, type)) < 0)
+		return error;
 
 	/* Parse raw object data */
 	def = &git_objects_table[type];
@@ -201,7 +202,7 @@ int git_object_lookup_prefix(
 				if (type != GIT_OBJECT_ANY && type != object->cached.type) {
 					git_object_free(object);
 					git_error_set(GIT_ERROR_INVALID,
-						"the requested type does not match the type in ODB");
+						"the requested type does not match the type in the ODB");
 					return GIT_ENOTFOUND;
 				}
 

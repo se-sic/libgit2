@@ -1876,9 +1876,9 @@ void test_diff_workdir__binary_detection(void)
 	git_buf b = GIT_BUF_INIT;
 	int i;
 	git_buf data[10] = {
-		{ "1234567890", 0, 0 },         /* 0 - all ascii text control */
-		{ "\xC3\x85\xC3\xBC\xE2\x80\xA0\x48\xC3\xB8\xCF\x80\xCE\xA9", 0, 0 },            /* 1 - UTF-8 multibyte text */
-		{ "\xEF\xBB\xBF\xC3\x9C\xE2\xA4\x92\xC6\x92\x38\xC2\xA3\xE2\x82\xAC", 0, 0 }, /* 2 - UTF-8 with BOM */
+		{ "1234567890", 0, 10 },         /* 0 - all ascii text control */
+		{ "\xC3\x85\xC3\xBC\xE2\x80\xA0\x48\xC3\xB8\xCF\x80\xCE\xA9", 0, 14 },            /* 1 - UTF-8 multibyte text */
+		{ "\xEF\xBB\xBF\xC3\x9C\xE2\xA4\x92\xC6\x92\x38\xC2\xA3\xE2\x82\xAC", 0, 16 }, /* 2 - UTF-8 with BOM */
 		{ STR999Z, 0, 1000 },           /* 3 - ASCII with NUL at 1000 */
 		{ STR3999Z, 0, 4000 },          /* 4 - ASCII with NUL at 4000 */
 		{ STR4000 STR3999Z "x", 0, 8001 }, /* 5 - ASCII with NUL at 8000 */
@@ -2159,4 +2159,47 @@ void test_diff_workdir__symlink_changed_on_non_symlink_platform(void)
 
 	git_tree_free(tree);
 	git_vector_free(&pathlist);
+}
+
+void test_diff_workdir__order(void)
+{
+	git_diff_options opts = GIT_DIFF_OPTIONS_INIT;
+	git_buf patch = GIT_BUF_INIT;
+	git_oid tree_oid, blob_oid;
+	git_treebuilder *builder;
+	git_tree *tree;
+	git_diff *diff;
+
+	g_repo = cl_git_sandbox_init("empty_standard_repo");
+
+	/* Build tree with a single file "abc.txt" */
+	cl_git_pass(git_blob_create_from_buffer(&blob_oid, g_repo, "foo\n", 4));
+	cl_git_pass(git_treebuilder_new(&builder, g_repo, NULL));
+	cl_git_pass(git_treebuilder_insert(NULL, builder, "abc.txt", &blob_oid, GIT_FILEMODE_BLOB));
+	cl_git_pass(git_treebuilder_write(&tree_oid, builder));
+	cl_git_pass(git_tree_lookup(&tree, g_repo, &tree_oid));
+
+	/* Create a directory that sorts before and one that sorts after "abc.txt" */
+	cl_git_mkfile("empty_standard_repo/abc.txt", "bar\n");
+	cl_must_pass(p_mkdir("empty_standard_repo/abb", 0777));
+	cl_must_pass(p_mkdir("empty_standard_repo/abd", 0777));
+
+	opts.flags = GIT_DIFF_INCLUDE_UNTRACKED;
+	cl_git_pass(git_diff_tree_to_workdir(&diff, g_repo, tree, &opts));
+
+	cl_assert_equal_i(1, git_diff_num_deltas(diff));
+	cl_git_pass(git_diff_to_buf(&patch, diff, GIT_DIFF_FORMAT_PATCH));
+	cl_assert_equal_s(patch.ptr,
+		"diff --git a/abc.txt b/abc.txt\n"
+		"index 257cc56..5716ca5 100644\n"
+		"--- a/abc.txt\n"
+		"+++ b/abc.txt\n"
+		"@@ -1 +1 @@\n"
+		"-foo\n"
+		"+bar\n");
+
+	git_treebuilder_free(builder);
+	git_buf_dispose(&patch);
+	git_diff_free(diff);
+	git_tree_free(tree);
 }

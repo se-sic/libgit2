@@ -764,7 +764,7 @@ int git_filter_list_apply_to_file(
 
 static int buf_from_blob(git_buf *out, git_blob *blob)
 {
-	git_off_t rawsize = git_blob_rawsize(blob);
+	git_object_size_t rawsize = git_blob_rawsize(blob);
 
 	if (!git__is_sizet(rawsize)) {
 		git_error_set(GIT_ERROR_OS, "blob is too large to filter");
@@ -941,7 +941,7 @@ out:
 	return error;
 }
 
-void stream_list_free(git_vector *streams)
+static void filter_streams_free(git_vector *streams)
 {
 	git_writestream *stream;
 	size_t i;
@@ -990,7 +990,7 @@ done:
 
 	if (fd >= 0)
 		p_close(fd);
-	stream_list_free(&filter_streams);
+	filter_streams_free(&filter_streams);
 	git_buf_dispose(&abspath);
 	return error;
 }
@@ -1018,7 +1018,7 @@ out:
 	if (initialized)
 		error |= stream_start->close(stream_start);
 
-	stream_list_free(&filter_streams);
+	filter_streams_free(&filter_streams);
 	return error;
 }
 

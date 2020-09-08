@@ -58,7 +58,7 @@ int git_revwalk__push_commit(git_revwalk *walk, const git_oid *oid, const git_re
 			return 0;
 
 		git_error_set(GIT_ERROR_INVALID, "object is not a committish");
-		return -1;
+		return error;
 	}
 	if (error < 0)
 		return error;
@@ -659,13 +659,11 @@ int git_revwalk_new(git_revwalk **revwalk_out, git_repository *repo)
 	git_revwalk *walk = git__calloc(1, sizeof(git_revwalk));
 	GIT_ERROR_CHECK_ALLOC(walk);
 
-	if (git_oidmap_new(&walk->commits) < 0)
+	if (git_oidmap_new(&walk->commits) < 0 ||
+	    git_pqueue_init(&walk->iterator_time, 0, 8, git_commit_list_time_cmp) < 0 ||
+	    git_pool_init(&walk->commit_pool, COMMIT_ALLOC) < 0)
 		return -1;
 
-	if (git_pqueue_init(&walk->iterator_time, 0, 8, git_commit_list_time_cmp) < 0)
-		return -1;
-
-	git_pool_init(&walk->commit_pool, COMMIT_ALLOC);
 	walk->get_next = &revwalk_next_unsorted;
 	walk->enqueue = &revwalk_enqueue_unsorted;
 
@@ -700,7 +698,7 @@ git_repository *git_revwalk_repository(git_revwalk *walk)
 	return walk->repo;
 }
 
-void git_revwalk_sorting(git_revwalk *walk, unsigned int sort_mode)
+int git_revwalk_sorting(git_revwalk *walk, unsigned int sort_mode)
 {
 	assert(walk);
 
@@ -719,11 +717,14 @@ void git_revwalk_sorting(git_revwalk *walk, unsigned int sort_mode)
 
 	if (walk->sorting != GIT_SORT_NONE)
 		walk->limited = 1;
+
+	return 0;
 }
 
-void git_revwalk_simplify_first_parent(git_revwalk *walk)
+int git_revwalk_simplify_first_parent(git_revwalk *walk)
 {
 	walk->first_parent = 1;
+	return 0;
 }
 
 int git_revwalk_next(git_oid *oid, git_revwalk *walk)
@@ -752,7 +753,7 @@ int git_revwalk_next(git_oid *oid, git_revwalk *walk)
 	return error;
 }
 
-void git_revwalk_reset(git_revwalk *walk)
+int git_revwalk_reset(git_revwalk *walk)
 {
 	git_commit_list_node *commit;
 
@@ -777,6 +778,8 @@ void git_revwalk_reset(git_revwalk *walk)
 	walk->limited = 0;
 	walk->did_push = walk->did_hide = 0;
 	walk->sorting = GIT_SORT_NONE;
+
+	return 0;
 }
 
 int git_revwalk_add_hide_cb(

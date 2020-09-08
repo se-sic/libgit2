@@ -255,7 +255,7 @@ extern int git_futils_truncate(const char *path, int mode);
 /**
  * Get the filesize in bytes of a file
  */
-extern git_off_t git_futils_filesize(git_file fd);
+extern int git_futils_filesize(uint64_t *out, git_file fd);
 
 #define GIT_PERMS_IS_EXEC(MODE)		(((MODE) & 0111) != 0)
 #define GIT_PERMS_CANONICAL(MODE)	(GIT_PERMS_IS_EXEC(MODE) ? 0755 : 0644)
@@ -290,7 +290,7 @@ extern mode_t git_futils_canonical_mode(mode_t raw_mode);
 extern int git_futils_mmap_ro(
 	git_map *out,
 	git_file fd,
-	git_off_t begin,
+	off64_t begin,
 	size_t len);
 
 /**
@@ -316,11 +316,11 @@ extern void git_futils_mmap_free(git_map *map);
 /**
  * Create a "fake" symlink (text file containing the target path).
  *
- * @param new symlink file to be created
- * @param old original symlink target
+ * @param target original symlink target
+ * @param path symlink file to be created
  * @return 0 on success, -1 on error
  */
-extern int git_futils_fake_symlink(const char *new, const char *old);
+extern int git_futils_fake_symlink(const char *target, const char *path);
 
 /**
  * A file stamp represents a snapshot of information about a file that can
@@ -330,7 +330,7 @@ extern int git_futils_fake_symlink(const char *new, const char *old);
  */
 typedef struct {
 	struct timespec mtime;
-	git_off_t  size;
+	uint64_t size;
 	unsigned int ino;
 } git_futils_filestamp;
 

@@ -133,10 +133,12 @@ void git_buf_dispose(git_buf *buf)
 	git_buf_init(buf, 0);
 }
 
+#ifndef GIT_DEPRECATE_HARD
 void git_buf_free(git_buf *buf)
 {
 	git_buf_dispose(buf);
 }
+#endif
 
 void git_buf_sanitize(git_buf *buf)
 {
@@ -363,7 +365,7 @@ int git_buf_encode_base85(git_buf *buf, const char *data, size_t len)
 
 		for (i = 24; i >= 0; i -= 8) {
 			uint8_t ch = *data++;
-			acc |= ch << i;
+			acc |= (uint32_t)ch << i;
 
 			if (--len == 0)
 				break;
@@ -567,6 +569,11 @@ void git_buf_copy_cstr(char *data, size_t datasize, const git_buf *buf)
 	data[copylen] = '\0';
 }
 
+void git_buf_consume_bytes(git_buf *buf, size_t len)
+{
+	git_buf_consume(buf, buf->ptr + len);
+}
+
 void git_buf_consume(git_buf *buf, const char *end)
 {
 	if (end > buf->ptr && end <= buf->ptr + buf->size) {
@@ -752,7 +759,8 @@ int git_buf_join(
 	ssize_t offset_a = -1;
 
 	/* not safe to have str_b point internally to the buffer */
-	assert(str_b < buf->ptr || str_b >= buf->ptr + buf->size);
+	if (buf->size)
+		assert(str_b < buf->ptr || str_b >= buf->ptr + buf->size);
 
 	/* figure out if we need to insert a separator */
 	if (separator && strlen_a) {
@@ -762,7 +770,7 @@ int git_buf_join(
 	}
 
 	/* str_a could be part of the buffer */
-	if (str_a >= buf->ptr && str_a < buf->ptr + buf->size)
+	if (buf->size && str_a >= buf->ptr && str_a < buf->ptr + buf->size)
 		offset_a = str_a - buf->ptr;
 
 	GIT_ERROR_CHECK_ALLOC_ADD(&alloc_len, strlen_a, strlen_b);

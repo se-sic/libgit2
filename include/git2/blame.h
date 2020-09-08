@@ -51,6 +51,8 @@ typedef enum {
 	 * 'git blame <file>').
 	 * Ignored if the blame options' 'newest_commit' field is not HEAD. */
 	GIT_BLAME_INCLUDE_UNCOMMITTED_CHANGES = (1<<6),
+	/** Ignore whitespace differences */
+	GIT_BLAME_IGNORE_WHITESPACE = (1<<7),
 } git_blame_flag_t;
 
 /**

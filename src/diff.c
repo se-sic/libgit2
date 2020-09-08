@@ -32,11 +32,6 @@ GIT_INLINE(const char *) diff_delta__path(const git_diff_delta *delta)
 	return str;
 }
 
-const char *git_diff_delta__path(const git_diff_delta *delta)
-{
-	return diff_delta__path(delta);
-}
-
 int git_diff_delta__cmp(const void *a, const void *b)
 {
 	const git_diff_delta *da = a, *db = b;
@@ -155,7 +150,7 @@ int git_diff_foreach(
 	return error;
 }
 
-int git_diff_format_email__append_header_tobuf(
+static int diff_format_email_append_header_tobuf(
 	git_buf *out,
 	const git_oid *id,
 	const git_signature *author,
@@ -212,7 +207,7 @@ int git_diff_format_email__append_header_tobuf(
 	return error;
 }
 
-int git_diff_format_email__append_patches_tobuf(
+static int diff_format_email_append_patches_tobuf(
 	git_buf *out,
 	git_diff *diff)
 {
@@ -292,7 +287,7 @@ int git_diff_format_email(
 		strncpy(summary, opts->summary, offset);
 	}
 
-	error = git_diff_format_email__append_header_tobuf(out,
+	error = diff_format_email_append_header_tobuf(out,
 		opts->id, opts->author, summary == NULL ? opts->summary : summary,
 		opts->body, opts->patch_no, opts->total_patches, ignore_marker);
 
@@ -305,7 +300,7 @@ int git_diff_format_email(
 		(error = git_diff_get_stats(&stats, diff)) < 0 ||
 		(error = git_diff_stats_to_buf(out, stats, format_flags, 0)) < 0 ||
 		(error = git_buf_putc(out, '\n')) < 0 ||
-		(error = git_diff_format_email__append_patches_tobuf(out, diff)) < 0)
+		(error = diff_format_email_append_patches_tobuf(out, diff)) < 0)
 			goto on_error;
 
 	error = git_buf_puts(out, "--\nlibgit2 " LIBGIT2_VERSION "\n\n");
@@ -357,10 +352,12 @@ int git_diff_options_init(git_diff_options *opts, unsigned int version)
 	return 0;
 }
 
+#ifndef GIT_DEPRECATE_HARD
 int git_diff_init_options(git_diff_options *opts, unsigned int version)
 {
 	return git_diff_options_init(opts, version);
 }
+#endif
 
 int git_diff_find_options_init(
 	git_diff_find_options *opts, unsigned int version)
@@ -370,11 +367,13 @@ int git_diff_find_options_init(
 	return 0;
 }
 
+#ifndef GIT_DEPRECATE_HARD
 int git_diff_find_init_options(
 	git_diff_find_options *opts, unsigned int version)
 {
 	return git_diff_find_options_init(opts, version);
 }
+#endif
 
 int git_diff_format_email_options_init(
 	git_diff_format_email_options *opts, unsigned int version)
@@ -385,11 +384,13 @@ int git_diff_format_email_options_init(
 	return 0;
 }
 
+#ifndef GIT_DEPRECATE_HARD
 int git_diff_format_email_init_options(
 	git_diff_format_email_options *opts, unsigned int version)
 {
 	return git_diff_format_email_options_init(opts, version);
 }
+#endif
 
 static int flush_hunk(git_oid *result, git_hash_ctx *ctx)
 {
@@ -426,41 +427,7 @@ static void strip_spaces(git_buf *buf)
 	git_buf_truncate(buf, len);
 }
 
-static int file_cb(
-	const git_diff_delta *delta,
-	float progress,
-	void *payload)
-{
-	struct patch_id_args *args = (struct patch_id_args *) payload;
-	git_buf buf = GIT_BUF_INIT;
-	int error;
-
-	GIT_UNUSED(progress);
-
-	if (!args->first_file &&
-	    (error = flush_hunk(&args->result, &args->ctx)) < 0)
-		goto out;
-	args->first_file = 0;
-
-	if ((error = git_buf_printf(&buf,
-				    "diff--gita/%sb/%s---a/%s+++b/%s",
-				    delta->old_file.path,
-				    delta->new_file.path,
-				    delta->old_file.path,
-				    delta->new_file.path)) < 0)
-		goto out;
-
-	strip_spaces(&buf);
-
-	if ((error = git_hash_update(&args->ctx, buf.ptr, buf.size)) < 0)
-		goto out;
-
-out:
-	git_buf_dispose(&buf);
-	return error;
-}
-
-static int patchid_line_cb(
+static int diff_patchid_print_callback_to_buf(
 	const git_diff_delta *delta,
 	const git_diff_hunk *hunk,
 	const git_diff_line *line,
@@ -468,38 +435,29 @@ static int patchid_line_cb(
 {
 	struct patch_id_args *args = (struct patch_id_args *) payload;
 	git_buf buf = GIT_BUF_INIT;
-	int error;
+	int error = 0;
 
-	GIT_UNUSED(delta);
-	GIT_UNUSED(hunk);
+	if (line->origin == GIT_DIFF_LINE_CONTEXT_EOFNL ||
+	    line->origin == GIT_DIFF_LINE_ADD_EOFNL ||
+	    line->origin == GIT_DIFF_LINE_DEL_EOFNL)
+		goto out;
 
-	switch (line->origin) {
-	    case GIT_DIFF_LINE_ADDITION:
-		git_buf_putc(&buf, '+');
-		break;
-	    case GIT_DIFF_LINE_DELETION:
-		git_buf_putc(&buf, '-');
-		break;
-	    case GIT_DIFF_LINE_CONTEXT:
-		break;
-	    case GIT_DIFF_LINE_CONTEXT_EOFNL:
-	    case GIT_DIFF_LINE_ADD_EOFNL:
-	    case GIT_DIFF_LINE_DEL_EOFNL:
-		/*
-		 * Ignore EOF without newlines for patch IDs as whitespace is
-		 * not supposed to be significant.
-		 */
-		return 0;
-	    default:
-		git_error_set(GIT_ERROR_PATCH, "invalid line origin for patch");
-		return -1;
-	}
+	if ((error = git_diff_print_callback__to_buf(delta, hunk,
+						     line, &buf)) < 0)
+		goto out;
 
-	git_buf_put(&buf, line->content, line->content_len);
 	strip_spaces(&buf);
+
+	if (line->origin == GIT_DIFF_LINE_FILE_HDR &&
+	    !args->first_file &&
+	    (error = flush_hunk(&args->result, &args->ctx) < 0))
+			goto out;
 
 	if ((error = git_hash_update(&args->ctx, buf.ptr, buf.size)) < 0)
 		goto out;
+
+	if (line->origin == GIT_DIFF_LINE_FILE_HDR && args->first_file)
+		args->first_file = 0;
 
 out:
 	git_buf_dispose(&buf);
@@ -526,7 +484,10 @@ int git_diff_patchid(git_oid *out, git_diff *diff, git_diff_patchid_options *opt
 	if ((error = git_hash_ctx_init(&args.ctx)) < 0)
 		goto out;
 
-	if ((error = git_diff_foreach(diff, file_cb, NULL, NULL, patchid_line_cb, &args)) < 0)
+	if ((error = git_diff_print(diff,
+				    GIT_DIFF_FORMAT_PATCH_ID,
+				    diff_patchid_print_callback_to_buf,
+				    &args)) < 0)
 		goto out;
 
 	if ((error = (flush_hunk(&args.result, &args.ctx))) < 0)

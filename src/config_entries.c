@@ -13,6 +13,11 @@ typedef struct config_entry_list {
 	git_config_entry *entry;
 } config_entry_list;
 
+typedef struct {
+	git_config_entry *entry;
+	bool multivar;
+} config_entry_map_head;
+
 typedef struct config_entries_iterator {
 	git_config_iterator parent;
 	git_config_entries *entries;
@@ -24,31 +29,6 @@ struct git_config_entries {
 	git_strmap *map;
 	config_entry_list *list;
 };
-
-static void config_entry_list_free(config_entry_list *list)
-{
-	config_entry_list *next;
-
-	while (list != NULL) {
-		next = list->next;
-
-		git__free((char*) list->entry->name);
-		git__free((char *) list->entry->value);
-		git__free(list->entry);
-		git__free(list);
-
-		list = next;
-	};
-}
-
-static void config_entry_list_append(config_entry_list **list, config_entry_list *entry)
-{
-	if (*list)
-		(*list)->last->next = entry;
-	else
-		*list = entry;
-	(*list)->last = entry;
-}
 
 int git_config_entries_new(git_config_entries **out)
 {
@@ -126,13 +106,18 @@ void git_config_entries_incref(git_config_entries *entries)
 static void config_entries_free(git_config_entries *entries)
 {
 	config_entry_list *list = NULL, *next;
+	config_entry_map_head *head;
 
-	git_strmap_foreach_value(entries->map, list, config_entry_list_free(list));
+	git_strmap_foreach_value(entries->map, head,
+		git__free((char *) head->entry->name); git__free(head)
+	);
 	git_strmap_free(entries->map);
 
 	list = entries->list;
 	while (list != NULL) {
 		next = list->next;
+		git__free((char *) list->entry->value);
+		git__free(list->entry);
 		git__free(list);
 		list = next;
 	}
@@ -148,71 +133,56 @@ void git_config_entries_free(git_config_entries *entries)
 
 int git_config_entries_append(git_config_entries *entries, git_config_entry *entry)
 {
-	config_entry_list *existing, *var;
-	int error = 0;
+	config_entry_list *list_head;
+	config_entry_map_head *map_head;
 
-	var = git__calloc(1, sizeof(config_entry_list));
-	GIT_ERROR_CHECK_ALLOC(var);
-	var->entry = entry;
-
-	if ((existing = git_strmap_get(entries->map, entry->name)) == NULL) {
+	if ((map_head = git_strmap_get(entries->map, entry->name)) != NULL) {
+		map_head->multivar = true;
 		/*
-		 * We only ever inspect `last` from the first config
-		 * entry in a multivar. In case where this new entry is
-		 * the first one in the entry map, it will also be the
-		 * last one at the time of adding it, which is
-		 * why we set `last` here to itself. Otherwise we
-		 * do not have to set `last` and leave it set to
-		 * `NULL`.
+		 * This is a micro-optimization for configuration files
+		 * with a lot of same keys. As for multivars the entry's
+		 * key will be the same for all entries, we can just free
+		 * all except the first entry's name and just re-use it.
 		 */
-		var->last = var;
-
-		error = git_strmap_set(entries->map, entry->name, var);
+		git__free((char *) entry->name);
+		entry->name = map_head->entry->name;
 	} else {
-		config_entry_list_append(&existing, var);
+		map_head = git__calloc(1, sizeof(*map_head));
+		if ((git_strmap_set(entries->map, entry->name, map_head)) < 0)
+			return -1;
 	}
+	map_head->entry = entry;
 
-	var = git__calloc(1, sizeof(config_entry_list));
-	GIT_ERROR_CHECK_ALLOC(var);
-	var->entry = entry;
-	config_entry_list_append(&entries->list, var);
+	list_head = git__calloc(1, sizeof(config_entry_list));
+	GIT_ERROR_CHECK_ALLOC(list_head);
+	list_head->entry = entry;
 
-	return error;
-}
-
-int config_entry_get(config_entry_list **out, git_config_entries *entries, const char *key)
-{
-	config_entry_list *list;
-
-	if ((list = git_strmap_get(entries->map, key)) == NULL)
-		return GIT_ENOTFOUND;
-
-	*out = list;
+	if (entries->list)
+		entries->list->last->next = list_head;
+	else
+		entries->list = list_head;
+	entries->list->last = list_head;
 
 	return 0;
 }
 
 int git_config_entries_get(git_config_entry **out, git_config_entries *entries, const char *key)
 {
-	config_entry_list *entry;
-	int error;
-
-	if ((error = config_entry_get(&entry, entries, key)) < 0)
-		return error;
-	*out = entry->last->entry;
-
+	config_entry_map_head *entry;
+	if ((entry = git_strmap_get(entries->map, key)) == NULL)
+		return GIT_ENOTFOUND;
+	*out = entry->entry;
 	return 0;
 }
 
 int git_config_entries_get_unique(git_config_entry **out, git_config_entries *entries, const char *key)
 {
-	config_entry_list *entry;
-	int error;
+	config_entry_map_head *entry;
 
-	if ((error = config_entry_get(&entry, entries, key)) < 0)
-		return error;
+	if ((entry = git_strmap_get(entries->map, key)) == NULL)
+		return GIT_ENOTFOUND;
 
-	if (entry->next != NULL) {
+	if (entry->multivar) {
 		git_error_set(GIT_ERROR_CONFIG, "entry is not unique due to being a multivar");
 		return -1;
 	}
@@ -227,14 +197,14 @@ int git_config_entries_get_unique(git_config_entry **out, git_config_entries *en
 	return 0;
 }
 
-void config_iterator_free(git_config_iterator *iter)
+static void config_iterator_free(git_config_iterator *iter)
 {
 	config_entries_iterator *it = (config_entries_iterator *) iter;
 	git_config_entries_free(it->entries);
 	git__free(it);
 }
 
-int config_iterator_next(
+static int config_iterator_next(
 	git_config_entry **entry,
 	git_config_iterator *iter)
 {

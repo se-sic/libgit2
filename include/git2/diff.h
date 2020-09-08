@@ -258,12 +258,12 @@ typedef enum {
  * abbreviated to something reasonable, like 7 characters.
  */
 typedef struct {
-	git_oid     id;
-	const char *path;
-	git_off_t   size;
-	uint32_t    flags;
-	uint16_t    mode;
-	uint16_t    id_abbrev;
+	git_oid            id;
+	const char        *path;
+	git_object_size_t  size;
+	uint32_t           flags;
+	uint16_t           mode;
+	uint16_t           id_abbrev;
 } git_diff_file;
 
 /**
@@ -1093,6 +1093,7 @@ typedef enum {
 	GIT_DIFF_FORMAT_RAW          = 3u, /**< like git diff --raw */
 	GIT_DIFF_FORMAT_NAME_ONLY    = 4u, /**< like git diff --name-only */
 	GIT_DIFF_FORMAT_NAME_STATUS  = 5u, /**< like git diff --name-status */
+	GIT_DIFF_FORMAT_PATCH_ID     = 6u, /**< git diff as used by git patch-id */
 } git_diff_format_t;
 
 /**

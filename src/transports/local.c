@@ -185,12 +185,12 @@ static int store_refs(transport_local *t)
 	}
 
 	t->have_refs = 1;
-	git_strarray_free(&ref_names);
+	git_strarray_dispose(&ref_names);
 	return 0;
 
 on_error:
 	git_vector_free(&t->refs);
-	git_strarray_free(&ref_names);
+	git_strarray_dispose(&ref_names);
 	return -1;
 }
 
@@ -201,7 +201,7 @@ on_error:
 static int local_connect(
 	git_transport *transport,
 	const char *url,
-	git_cred_acquire_cb cred_acquire_cb,
+	git_credential_acquire_cb cred_acquire_cb,
 	void *cred_acquire_payload,
 	const git_proxy_options *proxy,
 	int direction, int flags)

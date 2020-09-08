@@ -391,10 +391,9 @@ int git_attr_cache__init(git_repository *repo)
 	 * hashtable for attribute macros, and string pool
 	 */
 	if ((ret = git_strmap_new(&cache->files)) < 0 ||
-	    (ret = git_strmap_new(&cache->macros)) < 0)
+	    (ret = git_strmap_new(&cache->macros)) < 0 ||
+	    (ret = git_pool_init(&cache->pool, 1)) < 0)
 		goto cancel;
-
-	git_pool_init(&cache->pool, 1);
 
 	cache = git__compare_and_swap(&repo->attrcache, NULL, cache);
 	if (cache)
@@ -403,7 +402,7 @@ int git_attr_cache__init(git_repository *repo)
 	git_config_free(cfg);
 
 	/* insert default macros */
-	return git_attr_add_macro(repo, "binary", "-diff -crlf -text");
+	return git_attr_add_macro(repo, "binary", "-diff -merge -text -crlf");
 
 cancel:
 	attr_cache__free(cache);
@@ -411,7 +410,7 @@ cancel:
 	return ret;
 }
 
-void git_attr_cache_flush(git_repository *repo)
+int git_attr_cache_flush(git_repository *repo)
 {
 	git_attr_cache *cache;
 
@@ -420,6 +419,8 @@ void git_attr_cache_flush(git_repository *repo)
 	 */
 	if (repo && (cache = git__swap(repo->attrcache, NULL)) != NULL)
 		attr_cache__free(cache);
+
+	return 0;
 }
 
 int git_attr_cache__insert_macro(git_repository *repo, git_attr_rule *macro)
